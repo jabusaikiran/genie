@@ -61,8 +61,16 @@ USER_AGENT     = "GitHubCopilotChat/0.23.1"
 
 def _data_dir() -> Path:
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    d = Path(base) / "Clicky"
+    d = Path(base) / "Genie"
     d.mkdir(parents=True, exist_ok=True)
+    old_token = Path(base) / "Clicky" / "github_token.json"
+    new_token = d / "github_token.json"
+    if old_token.exists() and not new_token.exists():
+        import shutil
+        try:
+            shutil.copy2(old_token, new_token)
+        except Exception:
+            pass
     return d
 
 

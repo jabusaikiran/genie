@@ -216,7 +216,7 @@ def pull_model(
 
 def _default_installer_path() -> Path:
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    d = Path(base) / "Clicky" / "downloads"
+    d = Path(base) / "Genie" / "downloads"
     d.mkdir(parents=True, exist_ok=True)
     return d / "OllamaSetup.exe"
 
@@ -317,7 +317,7 @@ def _cli():
         return
 
     if cmd == "diag":
-        print("─── Clicky Ollama diagnostics ───")
+        print("─── Genie Ollama diagnostics ───")
         print(f"Configured host:          {cfg.ollama_host}")
         print(f"Configured text model:    {cfg.ollama_text_model}")
         print(f"Configured vision model:  {cfg.ollama_vision_model}")

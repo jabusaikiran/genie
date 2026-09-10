@@ -104,17 +104,15 @@ def _copilot_login_flow(tray, panel, manager):
 
 
 def _setup_logging():
-    """Rotating runtime log at %LOCALAPPDATA%\\Clicky\\clicky.log — the #1
-    ask from bug reports: with no log file, 'stuck on Listening' class issues
-    were undiagnosable (GitHub issue #6)."""
+    """Rotating runtime log at %LOCALAPPDATA%\\Genie\\genie.log — diagnostic log."""
     import logging
     from logging.handlers import RotatingFileHandler
 
-    log_dir = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Clicky"
+    log_dir = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Genie"
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
         handler = RotatingFileHandler(
-            log_dir / "clicky.log", maxBytes=1_000_000, backupCount=2,
+            log_dir / "genie.log", maxBytes=1_000_000, backupCount=2,
             encoding="utf-8",
         )
         handler.setFormatter(logging.Formatter(
@@ -123,8 +121,8 @@ def _setup_logging():
         root = logging.getLogger()
         root.setLevel(logging.INFO)
         root.addHandler(handler)
-        logging.getLogger("clicky").info(
-            "=== Clicky starting (python %s) ===", sys.version.split()[0]
+        logging.getLogger("genie").info(
+            "=== Genie starting (python %s) ===", sys.version.split()[0]
         )
     except Exception:
         pass  # logging must never block startup
@@ -137,8 +135,8 @@ def main():
     )
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-    app.setApplicationName("Clicky")
-    app.setApplicationDisplayName("Clicky - AI Companion")
+    app.setApplicationName("Genie")
+    app.setApplicationDisplayName("Genie - AI Companion")
 
     # ── Core components ───────────────────────────────────────────────────────
     manager = CompanionManager()
@@ -178,14 +176,13 @@ def main():
     manager.sig_clear_drawings.connect(overlay.clear_annotations)
 
     # Errors. The toast names the log file because it only has room for the
-    # message itself — issue #15 was reported with no traceback simply because
-    # nobody knew a log existed.
+    # message itself.
     _log_hint = Path(
         os.environ.get("LOCALAPPDATA", Path.home())
-    ) / "Clicky" / "clicky.log"
+    ) / "Genie" / "genie.log"
     manager.sig_error.connect(
         lambda e: tray.show_notification(
-            "Clicky error", f"{e}\n\nFull details: {_log_hint}"
+            "Genie error", f"{e}\n\nFull details: {_log_hint}"
         )
     )
 
@@ -196,7 +193,7 @@ def main():
         ok = manager.attach_document(path)
         tray.show_notification(
             "Document Attached" if ok else "Attach failed",
-            f"{path}\nAsk Clicky about it now." if ok else
+            f"{path}\nAsk Genie about it now." if ok else
             "Couldn't read that file."
         )
     panel.on_document_dropped.connect(_on_doc_dropped)
@@ -267,7 +264,7 @@ def main():
     def _open_journal():
         import os, subprocess
         base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        path = os.path.join(base, "Clicky")
+        path = os.path.join(base, "Genie")
         try:
             os.startfile(path)
         except Exception:
@@ -278,14 +275,14 @@ def main():
     def _attach_doc():
         from PyQt6.QtWidgets import QFileDialog
         path, _ = QFileDialog.getOpenFileName(
-            None, "Attach a document for Clicky",
+            None, "Attach a document for Genie",
             "", "Documents (*.pdf *.docx *.txt *.md *.csv)"
         )
         if path:
             ok = manager.attach_document(path)
             tray.show_notification(
                 "Document Attached",
-                f"{path}\nAsk Clicky about it now." if ok else
+                f"{path}\nAsk Genie about it now." if ok else
                 "Couldn't read that file."
             )
     tray.on_attach_doc.connect(_attach_doc)
@@ -294,7 +291,7 @@ def main():
         manager.set_active_provider(name)
         panel.refresh_for_provider(name)       # repopulate model dropdown + badge
         tray.rebuild_menu()                    # tick mark moves to new provider
-        tray.show_notification("Clicky", f"Switched to {name}")
+        tray.show_notification("Genie", f"Switched to {name}")
 
     tray.on_switch_provider.connect(_switch)
     tray.on_stop.connect(manager.stop)
@@ -360,7 +357,7 @@ def main():
             manager.set_active_provider(provider)
             panel.refresh_for_provider(provider)
             tray.rebuild_menu()
-            tray.show_notification("Clicky", f"API keys saved — using {provider}")
+            tray.show_notification("Genie", f"API keys saved — using {provider}")
 
         dlg.keys_saved.connect(_applied)
         dlg.show()
@@ -371,13 +368,14 @@ def main():
         import datetime, json, platform, traceback
         from ai import ollama_bootstrap as ob
         base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        out = Path(base) / "Clicky" / f"diagnostics-{datetime.datetime.now():%Y%m%d-%H%M%S}.txt"
+        out = Path(base) / "Genie" / f"diagnostics-{datetime.datetime.now():%Y%m%d-%H%M%S}.txt"
+        out.parent.mkdir(parents=True, exist_ok=True)
         try:
             providers_d = cfg.describe()
         except Exception:
             providers_d = {}
         report = []
-        report.append(f"Clicky diagnostics — {datetime.datetime.now().isoformat()}")
+        report.append(f"Genie diagnostics — {datetime.datetime.now().isoformat()}")
         report.append(f"Python: {sys.version.split()[0]}")
         report.append(f"Platform: {platform.platform()}")
         report.append(f"Active LLM: {providers_d.get('llm', '?')}")
@@ -434,10 +432,10 @@ def main():
     providers = cfg.describe()
     _hk = "+".join(p.strip().capitalize() for p in cfg.hotkey.split("+"))
     tray.show_notification(
-        "Clicky is running",
-        (f"Say 'Clicky' or press {_hk}  |  LLM: {providers['llm']}"
+        "Genie is running",
+        (f"Say 'Genie' or press {_hk}  |  LLM: {providers['llm']}"
          if cfg.ambient_mic() else
-         f"Press {_hk}, ask your question, and Clicky answers when you stop "
+         f"Press {_hk}, ask your question, and Genie answers when you stop "
          f"talking  |  LLM: {providers['llm']}"),
     )
 

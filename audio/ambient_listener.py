@@ -33,8 +33,10 @@ SILENCE_BLOCKS_END = 20              # ~600ms of silence ends a segment
 MAX_SEGMENT_BLOCKS = 120             # ~3.6s max wake-word segment
 PRE_ROLL_BLOCKS    = 18              # ~540ms of pre-roll for the wake word
 
-# Wake phrases — whisper tiny often mis-transcribes "clicky" so we cover variants
+# Wake phrases — whisper tiny often mis-transcribes, so we cover variants
 WAKE_WORDS = (
+    "genie", "hey genie", "hi genie", "ok genie", "yo genie",
+    "jeanie", "gini", "geenie", "gee knee",
     "clicky", "click e", "click he", "click me", "clickie", "clicki",
     "cliki", "klicki", "klicky", "kilicky", "clickey", "clickity",
     "hey clicky", "hi clicky", "hey click", "ok clicky", "yo clicky",
@@ -296,7 +298,7 @@ class AmbientListener:
                 condition_on_previous_text=False,
                 no_speech_threshold=0.45,
                 temperature=0.0,
-                initial_prompt="Clicky is a helpful AI assistant.",
+                initial_prompt="Genie is a helpful AI assistant.",
             )
             return " ".join(s.text for s in segments)
         finally:

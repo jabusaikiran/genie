@@ -52,7 +52,7 @@ class LessonRecorder:
             return None
 
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        self._out_dir = Path.home() / "Documents" / "Clicky Lessons" / ts
+        self._out_dir = Path.home() / "Documents" / "Genie Lessons" / ts
         self._out_dir.mkdir(parents=True, exist_ok=True)
 
         with mss.mss() as sct:

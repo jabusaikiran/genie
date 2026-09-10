@@ -32,9 +32,17 @@ _INTERVALS_DAYS = (1, 3, 7, 14, 30, 60, 120)
 
 def _db_path() -> Path:
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    d = Path(base) / "Clicky"
+    d = Path(base) / "Genie"
     d.mkdir(parents=True, exist_ok=True)
-    return d / "journal.db"
+    target = d / "journal.db"
+    old_db = Path(base) / "Clicky" / "journal.db"
+    if old_db.exists() and not target.exists():
+        import shutil
+        try:
+            shutil.copy2(old_db, target)
+        except Exception:
+            pass
+    return target
 
 
 def _connect() -> sqlite3.Connection:

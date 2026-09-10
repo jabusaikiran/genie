@@ -35,7 +35,7 @@ from tutor_features import (
 )
 import skills as skills_pkg
 
-_log = logging.getLogger("clicky.manager")
+_log = logging.getLogger("genie.manager")
 
 
 def _ensure_ollama_running():
@@ -114,7 +114,7 @@ def _build_system_prompt(
 
     # ── Quiz mode: dominant prompt that completely replaces normal behaviour ──
     if quiz_mode:
-        return f"""You are Clicky, an interactive QUIZ TUTOR. The user has
+        return f"""You are Genie, an interactive QUIZ TUTOR. The user has
 turned on Quiz Mode and wants to be tested, NOT explained to.
 
 {chr(10).join(ctx_lines)}

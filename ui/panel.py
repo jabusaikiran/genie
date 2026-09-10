@@ -35,7 +35,7 @@ def _hotkey_label() -> str:
 
 
 STATE_LABELS = {
-    AppState.IDLE:      f"Say 'Clicky' or {_hotkey_label()}",
+    AppState.IDLE:      f"Say 'Genie' or {_hotkey_label()}",
     AppState.LISTENING: "Listening...",
     AppState.THINKING:  "Thinking...",
     AppState.SPEAKING:  "Speaking...",
@@ -194,7 +194,7 @@ class CompanionPanel(QWidget):
 
         # Header
         header = QHBoxLayout()
-        title = QLabel("Clicky")
+        title = QLabel("Genie")
         title.setObjectName("title")
         title.setFont(FONT_TITLE)
         header.addWidget(title)
@@ -254,7 +254,7 @@ class CompanionPanel(QWidget):
         root.addWidget(scroll, stretch=1)
 
         # Push-to-talk button
-        self._ptt_btn = QPushButton(f"Say 'Clicky' or hold {_hotkey_label()}")
+        self._ptt_btn = QPushButton(f"Say 'Genie' or hold {_hotkey_label()}")
         self._ptt_btn.setObjectName("hotkey_btn")
         self._ptt_btn.setFont(FONT_LABEL)
         self._ptt_btn.setFixedHeight(44)
@@ -372,7 +372,7 @@ class CompanionPanel(QWidget):
             f"2.  Enter code:\n\n"
             f"        {user_code}\n\n"
             "3.  Click Authorize in GitHub.\n\n"
-            "Clicky will sign in automatically once you authorize."
+            "Genie will sign in automatically once you authorize."
         )
         self._response_label.setText(self._response_text)
         self._status_label.setText("Waiting for Copilot authorization…")

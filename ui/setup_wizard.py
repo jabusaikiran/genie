@@ -40,9 +40,16 @@ from config import cfg
 # Marker file: the wizard skips itself if this exists.
 def _flag_path() -> Path:
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    d = Path(base) / "Clicky"
+    d = Path(base) / "Genie"
     d.mkdir(parents=True, exist_ok=True)
-    return d / "setup_complete.flag"
+    flag = d / "setup_complete.flag"
+    old_flag = Path(base) / "Clicky" / "setup_complete.flag"
+    if old_flag.exists() and not flag.exists():
+        try:
+            flag.write_text(old_flag.read_text())
+        except Exception:
+            pass
+    return flag
 
 
 def setup_already_ran() -> bool:
@@ -70,7 +77,7 @@ class SetupWizard(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Clicky Setup")
+        self.setWindowTitle("Genie Setup")
         self.setModal(False)
         self.setMinimumSize(600, 420)
         self.setStyleSheet("""
@@ -114,7 +121,7 @@ class SetupWizard(QDialog):
         layout.setContentsMargins(32, 28, 32, 24)
         layout.setSpacing(14)
 
-        self.title = QLabel("Welcome to Clicky")
+        self.title = QLabel("Welcome to Genie")
         self.title.setObjectName("title")
         layout.addWidget(self.title)
 
@@ -176,14 +183,14 @@ class SetupWizard(QDialog):
         self.skip_btn.setText("Skip")
 
         if step == "welcome":
-            self.title.setText("Meet Clicky")
+            self.title.setText("Meet Genie")
             self.subtitle.setText(
-                "Clicky is an AI tutor that lives next to your cursor and can see "
+                "Genie is an AI companion that lives next to your cursor and can see "
                 "your screen — so it can point at things instead of just describing "
                 "them.\n\n"
                 f"•  Hold {_pretty_hotkey()} anywhere in Windows, or just say "
-                "\"Clicky\", then ask your question out loud.\n"
-                "•  Clicky answers by speaking, and draws arrows, circles and "
+                "\"Genie\", then ask your question out loud.\n"
+                "•  Genie answers by speaking, and draws arrows, circles and "
                 "labels directly on your screen.\n"
                 "•  Ask it about whatever you're looking at — a PDF, an error "
                 "message, a chart, a settings page.\n"
@@ -242,7 +249,7 @@ class SetupWizard(QDialog):
             name = cfg.ollama_text_model
             self.title.setText("Download the text model")
             self.subtitle.setText(
-                f"Pulling {name} (≈2 GB). This is what answers when you ask Clicky "
+                f"Pulling {name} (≈2 GB). This is what answers when you ask Genie "
                 f"a question."
             )
             self.action_btn.setText(f"Pull {name}")
@@ -259,7 +266,7 @@ class SetupWizard(QDialog):
             name = cfg.ollama_vision_model
             self.title.setText("Download the vision model (optional)")
             self.subtitle.setText(
-                f"Pulling {name} (≈3 GB). Needed only when Clicky reads your screen "
+                f"Pulling {name} (≈3 GB). Needed only when Genie reads your screen "
                 f"— pointing, screenshots, reading charts. You can skip this and "
                 f"add it later from the tray."
             )
@@ -276,7 +283,7 @@ class SetupWizard(QDialog):
         elif step == "keys":
             self.title.setText("Add an API key")
             self.subtitle.setText(
-                "Paste a key for Claude, OpenAI or Gemini. Clicky saves it next to "
+                "Paste a key for Claude, OpenAI or Gemini. Genie saves it next to "
                 "the app and starts using it right away — you can add, change or "
                 "remove keys later from Tray → Setup & Diagnostics → API Keys."
             )
@@ -290,13 +297,13 @@ class SetupWizard(QDialog):
             self.title.setText("All set 🎉")
             providers = cfg.describe()
             self.subtitle.setText(
-                f"Clicky is ready, running on {providers['llm']}.\n\n"
-                f"•  Hold {_pretty_hotkey()} and speak, or say \"Clicky\".\n"
+                f"Genie is ready, running on {providers['llm']}.\n\n"
+                f"•  Hold {_pretty_hotkey()} and speak, or say \"Genie\".\n"
                 "•  Press Esc to cut a long answer short.\n"
                 "•  Right-click the tray icon for modes, models and settings.\n"
                 "•  Drag a PDF onto the panel to ask questions about it."
             )
-            self.action_btn.setText("Start using Clicky")
+            self.action_btn.setText("Start using Genie")
             self.skip_btn.hide()
             mark_setup_complete()
 
