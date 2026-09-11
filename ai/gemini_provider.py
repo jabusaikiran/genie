@@ -18,6 +18,8 @@ STREAM_URL = (
 
 
 class GeminiProvider(BaseLLMProvider):
+    provider_id = "gemini"
+    display_name = "Google Gemini"
 
     def __init__(self):
         self._api_key = cfg.google_api_key

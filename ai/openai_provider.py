@@ -10,6 +10,8 @@ MAX_TOKENS = 1024
 
 
 class OpenAIProvider(BaseLLMProvider):
+    provider_id = "openai"
+    display_name = "OpenAI"
 
     def __init__(self):
         # OPENAI_BASE_URL turns this into a generic OpenAI-compatible client:

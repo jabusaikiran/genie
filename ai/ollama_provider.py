@@ -3,22 +3,14 @@ from typing import AsyncIterator, List
 
 import httpx
 
-from ai.base_provider import BaseLLMProvider, Message
+from ai.base_provider import BaseLLMProvider, Message, ModelInfo
 from ai.ollama_models_registry import is_vision_capable
 from config import cfg
 
 
 class OllamaProvider(BaseLLMProvider):
-    """
-    Streams responses from a local Ollama instance.
-
-    Auto-picks the right model per call:
-        • Screenshots present → cfg.get_ollama_model("vision")
-        • No screenshots      → cfg.get_ollama_model("text")
-
-    A caller may still pass an explicit `model=` to override that choice
-    (e.g. the panel's manual model dropdown).
-    """
+    provider_id = "ollama"
+    display_name = "Ollama"
 
     def __init__(self):
         self._base = cfg.ollama_host.rstrip("/")
@@ -27,6 +19,17 @@ class OllamaProvider(BaseLLMProvider):
 
     def _pick_model(self, has_screenshots: bool) -> str:
         return cfg.get_ollama_model("vision" if has_screenshots else "text")
+
+    def get_capabilities(self, model: str | None = None) -> ModelInfo:
+        chosen = model or self._pick_model(has_screenshots=True)
+        is_vis = is_vision_capable(chosen)
+        return ModelInfo(
+            id=chosen,
+            display_name=chosen,
+            vision=is_vis,
+            context_window=128_000 if "llama" in chosen.lower() else 32_768,
+            cost_tier="free",
+        )
 
     async def stream_response(
         self,

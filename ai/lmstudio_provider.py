@@ -21,15 +21,8 @@ from config import cfg
 
 
 class LMStudioProvider(BaseLLMProvider):
-    """
-    Streams responses from a local LM Studio server (OpenAI-compatible
-    /v1/chat/completions endpoint).
-
-    Model selection: LM Studio serves whichever model is currently loaded
-    in the app. cfg.lmstudio_model, if set, is sent explicitly (useful if
-    you keep several models loaded); otherwise we ask LM Studio to use
-    whatever's active via a placeholder id, which it accepts.
-    """
+    provider_id = "lmstudio"
+    display_name = "LM Studio"
 
     def __init__(self):
         self._base = cfg.lmstudio_host.rstrip("/")

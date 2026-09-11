@@ -34,7 +34,7 @@ from typing import AsyncIterator, List, Optional
 
 import httpx
 
-from ai.base_provider import BaseLLMProvider, Message
+from ai.base_provider import BaseLLMProvider, Message, ModelInfo
 
 
 VSCODE_CLIENT_ID = "Iv1.b507a08c87ecfe98"   # Public VS Code Copilot client id
@@ -543,6 +543,8 @@ def sorted_model_ids() -> list[str]:
 # ─── Provider ─────────────────────────────────────────────────────────────────
 
 class GitHubCopilotProvider(BaseLLMProvider):
+    provider_id = "copilot"
+    display_name = "GitHub Copilot"
 
     def __init__(self):
         self._gh_token = load_github_token()
@@ -552,6 +554,28 @@ class GitHubCopilotProvider(BaseLLMProvider):
             )
         self._copilot_token: Optional[str] = None
         self._copilot_token_expires: float = 0.0
+
+    def get_capabilities(self, model: str | None = None) -> ModelInfo:
+        chosen = model or pick_default_free_model()
+        for m in cached_models():
+            if m.get("id") == chosen:
+                is_vis = bool(m.get("vision", False))
+                mult = m.get("multiplier")
+                tier = "free" if mult == 0 else ("lightweight" if m.get("category") == "lightweight" else "standard")
+                return ModelInfo(
+                    id=chosen,
+                    display_name=model_label(chosen),
+                    vision=is_vis,
+                    context_window=128_000,
+                    cost_tier=tier,
+                )
+        return ModelInfo(
+            id=chosen,
+            display_name=chosen,
+            vision=True,
+            context_window=128_000,
+            cost_tier="free",
+        )
 
     async def _get_copilot_token(self, client: httpx.AsyncClient) -> str:
         # Short-lived token, refresh with ~2 min buffer

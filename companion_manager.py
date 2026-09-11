@@ -753,7 +753,8 @@ class CompanionManager(QObject):
                 images_b64 = []
             else:
                 screenshots = capture_all_screens()
-                images_b64 = [s.base64_jpeg for s in screenshots]
+                llm = self._get_llm()
+                images_b64 = [s.base64_jpeg for s in screenshots] if llm.supports_vision(self._current_model) else []
             # Fresh question → wipe the previous lesson's drawings and remember
             # this turn's screenshots for coordinate mapping.
             self._screens_ctx = screenshots
@@ -1575,7 +1576,8 @@ class CompanionManager(QObject):
         try:
             self._emit_state(AppState.THINKING)
             screenshots = capture_all_screens()
-            images_b64 = [s.base64_jpeg for s in screenshots]
+            llm = self._get_llm()
+            images_b64 = [s.base64_jpeg for s in screenshots] if llm.supports_vision(self._current_model) else []
             title = active_window_title()
             system = _build_system_prompt(
                 window_title=title, quiz_mode=True,
