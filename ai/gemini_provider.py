@@ -35,9 +35,12 @@ from config import cfg
 log = logging.getLogger("genie.ai.gemini")
 
 DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_THINKING_BUDGET = 0
 STREAM_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent"
 )
+
+_UNSET = object()
 
 BLOCKED_FINISH_REASONS = {
     "SAFETY",
@@ -183,6 +186,7 @@ def build_gemini_payload(
     supports_vision: bool = True,
     max_tokens: int = 1024,
     temperature: float = 0.7,
+    thinking_budget: Optional[int] = DEFAULT_THINKING_BUDGET,
 ) -> dict:
     """Construct the Gemini REST JSON payload with history, system instruction, and parameters."""
     contents = []
@@ -214,12 +218,18 @@ def build_gemini_payload(
 
     contents.append({"role": "user", "parts": parts})
 
+    generation_config: dict[str, Any] = {
+        "maxOutputTokens": max_tokens,
+        "temperature": temperature,
+    }
+    if thinking_budget is not None:
+        generation_config["thinkingConfig"] = {
+            "thinkingBudget": thinking_budget,
+        }
+
     body: dict = {
         "contents": contents,
-        "generationConfig": {
-            "maxOutputTokens": max_tokens,
-            "temperature": temperature,
-        },
+        "generationConfig": generation_config,
     }
     if system_prompt:
         body["systemInstruction"] = {"parts": [{"text": system_prompt}]}
@@ -237,12 +247,18 @@ class GeminiProvider(BaseLLMProvider):
         default_model: Optional[str] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        thinking_budget: Any = _UNSET,
         timeout: float = 120.0,
     ):
         self._api_key = api_key if api_key is not None else cfg.google_api_key
         self.default_model = default_model or getattr(cfg, "gemini_default_model", DEFAULT_MODEL)
         self.max_tokens = max_tokens if max_tokens is not None else getattr(cfg, "gemini_max_tokens", 1024)
         self.temperature = temperature if temperature is not None else getattr(cfg, "gemini_temperature", 0.7)
+        self.thinking_budget = (
+            thinking_budget
+            if thinking_budget is not _UNSET
+            else getattr(cfg, "gemini_thinking_budget", DEFAULT_THINKING_BUDGET)
+        )
         self.timeout = timeout
 
     async def stream_response(
@@ -254,6 +270,7 @@ class GeminiProvider(BaseLLMProvider):
         model: str | None = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        thinking_budget: Any = _UNSET,
     ) -> AsyncIterator[str]:
         if not self._api_key:
             raise AuthenticationError(
@@ -265,6 +282,9 @@ class GeminiProvider(BaseLLMProvider):
         model = model or self.default_model or DEFAULT_MODEL
         effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
         effective_temperature = temperature if temperature is not None else self.temperature
+        effective_thinking_budget = (
+            thinking_budget if thinking_budget is not _UNSET else self.thinking_budget
+        )
 
         # Model registry vision check
         vision_capable = self.supports_vision(model)
@@ -283,6 +303,7 @@ class GeminiProvider(BaseLLMProvider):
             supports_vision=vision_capable,
             max_tokens=effective_max_tokens,
             temperature=effective_temperature,
+            thinking_budget=effective_thinking_budget,
         )
 
         url = f"{STREAM_URL.format(model=model)}?alt=sse&key={self._api_key}"
@@ -328,6 +349,8 @@ class GeminiProvider(BaseLLMProvider):
                                 )
 
                             for part in cand.get("content", {}).get("parts", []):
+                                if part.get("thought", False):
+                                    continue
                                 text = part.get("text", "")
                                 if text:
                                     yield text

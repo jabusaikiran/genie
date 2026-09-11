@@ -130,6 +130,10 @@ class TestGeminiProvider(unittest.TestCase):
         # Generation config
         self.assertEqual(payload["generationConfig"]["maxOutputTokens"], 2048)
         self.assertEqual(payload["generationConfig"]["temperature"], 0.4)
+        self.assertEqual(
+            payload["generationConfig"]["thinkingConfig"],
+            {"thinkingBudget": 0},
+        )
 
     def test_multimodal_payload_construction_vision_supported(self):
         """Verify screenshots are formatted as inline_data parts when model supports vision."""
@@ -505,6 +509,108 @@ class TestGeminiProvider(unittest.TestCase):
         # 3. Missing API key
         provider_no_key = GeminiProvider(api_key="")
         self.assertFalse(asyncio.run(provider_no_key.health_check()))
+
+    def test_thinking_budget_default_zero(self):
+        """Verify thinkingConfig with thinkingBudget=0 is included by default."""
+        payload = build_gemini_payload("test prompt")
+        self.assertIn("thinkingConfig", payload["generationConfig"])
+        self.assertEqual(payload["generationConfig"]["thinkingConfig"]["thinkingBudget"], 0)
+
+    def test_thinking_budget_explicit_non_zero(self):
+        """Verify explicit non-zero thinking budget is set in generationConfig."""
+        payload = build_gemini_payload("test prompt", thinking_budget=1024)
+        self.assertIn("thinkingConfig", payload["generationConfig"])
+        self.assertEqual(payload["generationConfig"]["thinkingConfig"]["thinkingBudget"], 1024)
+
+    def test_thinking_budget_none_omits_config(self):
+        """Verify thinking_budget=None cleanly omits thinkingConfig."""
+        payload = build_gemini_payload("test prompt", thinking_budget=None)
+        self.assertNotIn("thinkingConfig", payload["generationConfig"])
+
+    def test_stream_response_thinking_budget_default_zero(self):
+        """Verify stream_response includes thinkingBudget=0 by default in sent payload."""
+        provider = GeminiProvider(api_key="test_key")
+        mock_resp = MockResponse(
+            status_code=200,
+            lines=['data: {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}', "data: [DONE]"],
+        )
+        mock_client = MockAsyncClient(response=mock_resp)
+
+        async def run():
+            with patch("httpx.AsyncClient", return_value=mock_client):
+                async for _ in provider.stream_response("test", [], [], ""):
+                    pass
+
+        asyncio.run(run())
+        gen_config = mock_client.last_json["generationConfig"]
+        self.assertIn("thinkingConfig", gen_config)
+        self.assertEqual(gen_config["thinkingConfig"]["thinkingBudget"], 0)
+
+    def test_stream_response_thinking_budget_provider_override(self):
+        """Verify GeminiProvider(thinking_budget=...) sets the thinkingBudget in requests."""
+        provider = GeminiProvider(api_key="test_key", thinking_budget=2048)
+        mock_resp = MockResponse(status_code=200, lines=['data: {"candidates": []}'])
+        mock_client = MockAsyncClient(response=mock_resp)
+
+        async def run():
+            with patch("httpx.AsyncClient", return_value=mock_client):
+                async for _ in provider.stream_response("test", [], [], ""):
+                    pass
+
+        asyncio.run(run())
+        gen_config = mock_client.last_json["generationConfig"]
+        self.assertEqual(gen_config["thinkingConfig"]["thinkingBudget"], 2048)
+
+    def test_stream_response_thinking_budget_call_override(self):
+        """Verify per-call thinking_budget overrides provider-level default."""
+        provider = GeminiProvider(api_key="test_key")  # default 0
+        mock_resp = MockResponse(status_code=200, lines=['data: {"candidates": []}'])
+        mock_client = MockAsyncClient(response=mock_resp)
+
+        async def run():
+            with patch("httpx.AsyncClient", return_value=mock_client):
+                async for _ in provider.stream_response("test", [], [], "", thinking_budget=4096):
+                    pass
+
+        asyncio.run(run())
+        gen_config = mock_client.last_json["generationConfig"]
+        self.assertEqual(gen_config["thinkingConfig"]["thinkingBudget"], 4096)
+
+    def test_stream_response_thinking_budget_call_none_omits_config(self):
+        """Verify per-call thinking_budget=None omits thinkingConfig to restore default model reasoning."""
+        provider = GeminiProvider(api_key="test_key")
+        mock_resp = MockResponse(status_code=200, lines=['data: {"candidates": []}'])
+        mock_client = MockAsyncClient(response=mock_resp)
+
+        async def run():
+            with patch("httpx.AsyncClient", return_value=mock_client):
+                async for _ in provider.stream_response("test", [], [], "", thinking_budget=None):
+                    pass
+
+        asyncio.run(run())
+        gen_config = mock_client.last_json["generationConfig"]
+        self.assertNotIn("thinkingConfig", gen_config)
+
+    def test_stream_response_filters_thought_parts(self):
+        """Verify candidate parts with thought=True are not yielded to the caller."""
+        provider = GeminiProvider(api_key="test_key")
+        sse_lines = [
+            'data: {"candidates": [{"content": {"parts": [{"text": "thinking step...", "thought": true}]}}]}',
+            'data: {"candidates": [{"content": {"parts": [{"text": "Hello user!", "thought": false}]}}]}',
+            "data: [DONE]",
+        ]
+        mock_resp = MockResponse(status_code=200, lines=sse_lines)
+        mock_client = MockAsyncClient(response=mock_resp)
+
+        async def run():
+            chunks = []
+            with patch("httpx.AsyncClient", return_value=mock_client):
+                async for chunk in provider.stream_response("Say hello", [], [], "System"):
+                    chunks.append(chunk)
+            return chunks
+
+        chunks = asyncio.run(run())
+        self.assertEqual(chunks, ["Hello user!"])
 
 
 if __name__ == "__main__":
