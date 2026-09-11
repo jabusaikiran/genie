@@ -14,7 +14,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -200,6 +200,84 @@ POINT_TRIGGER_RE = re.compile(
     r"point\s+(at|to)|show\s+me\s+(the|where)|click\s+(the|on)|find\s+the)\b",
     re.IGNORECASE,
 )
+
+
+def _sanitize_history_text(text: str) -> str:
+    """Remove Genie control and drawing tags from assistant responses before storing in history."""
+    if not text:
+        return ""
+    cleaned = ANY_TAG_RE.sub("", text)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _budget_context(
+    model_info: Any,
+    system_base: str,
+    user_text: str,
+    attached_docs: list[tuple[str, str]],
+    history: list[Message],
+    screenshots_b64: list[str],
+) -> tuple[str, list[Message]]:
+    """Ensure attached docs and history fit within the model's context window.
+
+    Preserves user_text, recent history over old history, and truncates docs when needed.
+    Returns (budgeted_doc_extra, budgeted_history).
+    """
+    ctx_window = getattr(model_info, "context_window", 128_000) or 128_000
+    # Reserve ~25% of context window (between 1024 and 2048 tokens) for model output & safety margin
+    reserve_tokens = max(1024, min(2048, ctx_window // 4))
+    available_input_tokens = max(500, ctx_window - reserve_tokens)
+
+    # Estimate vision token consumption (~1000 tokens per attached screenshot)
+    vision_tokens = len(screenshots_b64) * 1000
+    text_budget_tokens = max(300, available_input_tokens - vision_tokens)
+
+    # 1 token ~= 4 characters approximation
+    def approx_tok(s: str) -> int:
+        return (len(s) // 4) + 1
+
+    essential_tokens = approx_tok(system_base) + approx_tok(user_text)
+    remaining_tokens = text_budget_tokens - essential_tokens
+
+    if remaining_tokens <= 0:
+        return "", []
+
+    # Priority 2: Retain recent conversation history over older history
+    budgeted_history: list[Message] = []
+    hist_tokens_used = 0
+    for msg in reversed(history):
+        m_tok = approx_tok(msg.content) + 4
+        if hist_tokens_used + m_tok <= remaining_tokens:
+            budgeted_history.append(msg)
+            hist_tokens_used += m_tok
+        else:
+            break
+    budgeted_history.reverse()
+
+    remaining_for_docs = remaining_tokens - hist_tokens_used
+
+    # Priority 3: Attached documents
+    if not attached_docs or remaining_for_docs <= 0:
+        return "", budgeted_history
+
+    doc_chars_limit = remaining_for_docs * 4
+    doc_extra_parts = []
+    used_chars = 0
+
+    for fname, text in attached_docs:
+        if used_chars >= doc_chars_limit:
+            break
+        avail_chars = doc_chars_limit - used_chars
+        if len(text) > avail_chars:
+            trunc_text = text[:max(0, avail_chars - 60)] + "\n[... document truncated to fit model context window ...]"
+            doc_extra_parts.append(pdf_context.format_for_prompt(fname, trunc_text))
+            break
+        else:
+            doc_extra_parts.append(pdf_context.format_for_prompt(fname, text))
+            used_chars += len(text) + 200
+
+    return "".join(doc_extra_parts), budgeted_history
 
 
 class CompanionManager(QObject):
@@ -689,7 +767,7 @@ class CompanionManager(QObject):
                 screenshots = []
                 images_b64 = []
             else:
-                screenshots = capture_all_screens()
+                screenshots = await asyncio.to_thread(capture_all_screens)
                 llm = self._get_llm()
                 images_b64 = [s.base64_jpeg for s in screenshots] if llm.supports_vision(self._current_model) else []
             # Fresh question → wipe the previous lesson's drawings and remember
@@ -844,13 +922,9 @@ class CompanionManager(QObject):
                 except Exception:
                     pass
 
-            # Attached documents (drag-dropped PDFs etc.)
-            doc_extra = ""
-            for fname, text in self._attached_docs:
-                doc_extra += pdf_context.format_for_prompt(fname, text)
-
-            # 4. Build system prompt with all context
-            system = _build_system_prompt(
+            # 4. Build base system prompt with all context except attached docs
+            base_extra = ocr_extra + fig_extra
+            system_base = _build_system_prompt(
                 window_title=title,
                 lesson_step=self._lesson_step_idx,
                 total_steps=len(self._lesson_steps),
@@ -858,10 +932,10 @@ class CompanionManager(QObject):
                 detected_coord=detected_coord,
                 code_active=code_active,
                 language_code=lang_code,
-                extra=ocr_extra + doc_extra + fig_extra,
+                extra=base_extra,
             )
             if sensitive:
-                system += (
+                system_base += (
                     "\n\nPRIVACY GUARD: the user's active window looks sensitive "
                     "(password manager, banking, login). I did NOT take a "
                     "screenshot. Answer from memory only, and tell the user you "
@@ -869,19 +943,32 @@ class CompanionManager(QObject):
                 )
             if search_results:
                 from ai.web_search import build_search_context
-                system += build_search_context(search_results)
+                system_base += build_search_context(search_results)
 
             # Use per-app history so context doesn't bleed between apps
             history = self._app_memory.setdefault(ak, [])
+
+            # Apply safe context-window budgeting
+            llm = self._get_llm()
+            model_info = llm.get_capabilities(self._current_model)
+            doc_extra, budgeted_history = _budget_context(
+                model_info=model_info,
+                system_base=system_base,
+                user_text=transcript,
+                attached_docs=self._attached_docs,
+                history=history,
+                screenshots_b64=images_b64,
+            )
+            system = system_base + doc_extra
 
             # 5. Stream LLM — buffer partial [POINT:...] tags so they never leak
             full_response = ""
             display_buf = ""
             self._cancel_flag = False
-            async for chunk in self._get_llm().stream_response(
+            async for chunk in llm.stream_response(
                 user_text=transcript,
                 screenshots_b64=images_b64,
-                history=history,
+                history=budgeted_history,
                 system_prompt=system,
                 model=self._current_model,
             ):
@@ -903,9 +990,10 @@ class CompanionManager(QObject):
             if display_buf:
                 self.sig_response_chunk.emit(ANY_TAG_RE.sub("", display_buf))
 
-            # 6. Update per-app history
+            # 6. Update per-app history with sanitized response (strip control/drawing tags)
             history.append(Message(role="user", content=transcript))
-            history.append(Message(role="assistant", content=full_response))
+            sanitized_response = _sanitize_history_text(full_response)
+            history.append(Message(role="assistant", content=sanitized_response))
             self._app_memory[ak] = history[-20:]
 
             # Multistep: parse numbered steps for later "next" invocations
@@ -1515,7 +1603,7 @@ class CompanionManager(QObject):
             return
         try:
             self._emit_state(AppState.THINKING)
-            screenshots = capture_all_screens()
+            screenshots = await asyncio.to_thread(capture_all_screens)
             llm = self._get_llm()
             images_b64 = [s.base64_jpeg for s in screenshots] if llm.supports_vision(self._current_model) else []
             title = active_window_title()

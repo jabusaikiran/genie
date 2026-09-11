@@ -144,17 +144,19 @@ class TestGeminiProvider(unittest.TestCase):
         contents = payload["contents"]
         self.assertEqual(len(contents), 1)
         parts = contents[0]["parts"]
-        # 2 images + 1 text prompt
-        self.assertEqual(len(parts), 3)
-        self.assertEqual(
-            parts[0],
-            {"inline_data": {"mime_type": "image/jpeg", "data": "fake_base64_data_1"}},
-        )
+        # 2 labeled images (2 labels + 2 images) + 1 text prompt
+        self.assertEqual(len(parts), 5)
+        self.assertEqual(parts[0], {"text": "Screen 1 (Primary):"})
         self.assertEqual(
             parts[1],
+            {"inline_data": {"mime_type": "image/jpeg", "data": "fake_base64_data_1"}},
+        )
+        self.assertEqual(parts[2], {"text": "Screen 2:"})
+        self.assertEqual(
+            parts[3],
             {"inline_data": {"mime_type": "image/jpeg", "data": "fake_base64_data_2"}},
         )
-        self.assertEqual(parts[2], {"text": "What is on this screen?"})
+        self.assertEqual(parts[4], {"text": "What is on this screen?"})
 
     def test_multimodal_payload_construction_vision_unsupported(self):
         """Verify screenshots are cleanly omitted when model does NOT support vision."""

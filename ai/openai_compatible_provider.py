@@ -195,10 +195,13 @@ def build_openai_messages(
     attach_images = bool(screenshots_b64) and supports_vision
 
     if attach_images:
+        valid_shots = [s for s in (screenshots_b64 or []) if s]
         content_parts: List[Dict[str, Any]] = []
-        for img_b64 in (screenshots_b64 or []):
-            if not img_b64:
-                continue
+        is_multi = len(valid_shots) > 1
+        for idx, img_b64 in enumerate(valid_shots, start=1):
+            if is_multi:
+                label = f"Screen {idx} (Primary):" if idx == 1 else f"Screen {idx}:"
+                content_parts.append({"type": "text", "text": label})
             content_parts.append({
                 "type": "image_url",
                 "image_url": {

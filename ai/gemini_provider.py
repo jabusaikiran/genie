@@ -198,7 +198,12 @@ def build_gemini_payload(
 
     parts: list = []
     if screenshots_b64 and supports_vision:
-        for img_b64 in screenshots_b64:
+        valid_shots = [s for s in screenshots_b64 if s]
+        is_multi = len(valid_shots) > 1
+        for idx, img_b64 in enumerate(valid_shots, start=1):
+            if is_multi:
+                label = f"Screen {idx} (Primary):" if idx == 1 else f"Screen {idx}:"
+                parts.append({"text": label})
             parts.append({
                 "inline_data": {"mime_type": "image/jpeg", "data": img_b64},
             })

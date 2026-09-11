@@ -1,11 +1,84 @@
-import base64
+import json
 from typing import AsyncIterator, List
 
 import httpx
 
 from ai.base_provider import BaseLLMProvider, Message, ModelInfo
 from ai.ollama_models_registry import is_vision_capable
+from ai.openai_compatible_provider import (
+    AuthenticationError,
+    BadRequestError,
+    ConnectionError,
+    NotFoundError,
+    OpenAIProviderError,
+    PermissionDeniedError,
+    RateLimitError,
+    ServerError,
+)
 from config import cfg
+
+
+def format_ollama_error(
+    status_code: int,
+    response_text: str = "",
+    model: str = "",
+) -> OpenAIProviderError:
+    """Translate Ollama HTTP status code and response payload into a typed provider error."""
+    detail = ""
+    if response_text:
+        try:
+            parsed = json.loads(response_text)
+            if isinstance(parsed, dict):
+                detail = parsed.get("error", "")
+            elif isinstance(parsed, str):
+                detail = parsed
+        except Exception:
+            detail = response_text.strip()[:300]
+
+    suffix = f" Details: {detail}" if detail else ""
+
+    if status_code == 404:
+        return NotFoundError(
+            f"[Ollama] Model '{model}' is not installed locally. "
+            f"Run `ollama pull {model}` or pick another model from Tray → Ollama.{suffix}",
+            provider="ollama",
+            status_code=404,
+            raw_error=response_text,
+        )
+    elif status_code == 429:
+        return RateLimitError(
+            f"[Ollama] Request rate limit exceeded.{suffix}",
+            provider="ollama",
+            status_code=429,
+            raw_error=response_text,
+        )
+    elif status_code in (401, 403):
+        return AuthenticationError(
+            f"[Ollama] Authentication failed (HTTP {status_code}).{suffix}",
+            provider="ollama",
+            status_code=status_code,
+            raw_error=response_text,
+        )
+    elif status_code == 400:
+        return BadRequestError(
+            f"[Ollama] Bad request for model '{model}'.{suffix}",
+            provider="ollama",
+            status_code=400,
+            raw_error=response_text,
+        )
+    elif status_code >= 500:
+        return ServerError(
+            f"[Ollama] Server error ({status_code}) from local daemon.{suffix}",
+            provider="ollama",
+            status_code=status_code,
+            raw_error=response_text,
+        )
+    return OpenAIProviderError(
+        f"[Ollama] Request failed with HTTP {status_code}.{suffix}",
+        provider="ollama",
+        status_code=status_code,
+        raw_error=response_text,
+    )
 
 
 class OllamaProvider(BaseLLMProvider):
@@ -55,7 +128,7 @@ class OllamaProvider(BaseLLMProvider):
 
         # Ollama passes images as base64 strings inside the message
         user_msg: dict = {"role": "user", "content": user_text}
-        if screenshots_b64:
+        if screenshots_b64 and self.supports_vision(chosen):
             user_msg["images"] = screenshots_b64
         messages.append(user_msg)
 
@@ -67,33 +140,50 @@ class OllamaProvider(BaseLLMProvider):
         }
 
         async with httpx.AsyncClient(timeout=120) as client:
-            async with client.stream(
-                "POST",
-                f"{self._base}/api/chat",
-                json=payload,
-            ) as response:
-                if response.status_code == 404:
-                    # Surface a useful error when the chosen model isn't
-                    # installed locally — students hit this constantly.
-                    raise RuntimeError(
-                        f"Ollama doesn't have '{chosen}' installed. "
-                        f"Run `ollama pull {chosen}` or pick another model "
-                        f"from Tray → Ollama."
-                    )
-                response.raise_for_status()
-                import json
-                async for line in response.aiter_lines():
-                    if not line.strip():
-                        continue
-                    try:
-                        data = json.loads(line)
-                        chunk = data.get("message", {}).get("content", "")
-                        if chunk:
-                            yield chunk
-                        if data.get("done"):
-                            break
-                    except json.JSONDecodeError:
-                        continue
+            try:
+                async with client.stream(
+                    "POST",
+                    f"{self._base}/api/chat",
+                    json=payload,
+                ) as response:
+                    if response.status_code >= 400:
+                        err_body = await response.aread()
+                        err_text = err_body.decode("utf-8", errors="replace")
+                        raise format_ollama_error(response.status_code, err_text, model=chosen)
+
+                    async for line in response.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            data = json.loads(line)
+                            chunk = data.get("message", {}).get("content", "")
+                            if chunk:
+                                yield chunk
+                            if data.get("done"):
+                                break
+                        except json.JSONDecodeError:
+                            continue
+            except OpenAIProviderError:
+                raise
+            except httpx.ConnectError as e:
+                raise ConnectionError(
+                    f"[Ollama] Could not connect to Ollama daemon at {self._base}. Is the service running? "
+                    "Start Ollama or run `ollama serve`.",
+                    provider="ollama",
+                    raw_error=e,
+                ) from e
+            except httpx.TimeoutException as e:
+                raise ConnectionError(
+                    f"[Ollama] Request timed out after 120s to {self._base}.",
+                    provider="ollama",
+                    raw_error=e,
+                ) from e
+            except Exception as e:
+                raise OpenAIProviderError(
+                    f"[Ollama] Streaming request failed: {e}",
+                    provider="ollama",
+                    raw_error=e,
+                ) from e
 
     async def health_check(self) -> bool:
         try:

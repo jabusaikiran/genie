@@ -95,14 +95,24 @@ class TestOpenAICompatible(unittest.TestCase):
 
         self.assertEqual(len(messages), 1)
         user_parts = messages[0]["content"]
-        self.assertEqual(len(user_parts), 4)  # 3 images + 1 text
-        for i in range(3):
-            self.assertEqual(user_parts[i]["type"], "image_url")
-            self.assertEqual(
-                user_parts[i]["image_url"]["url"],
-                f"data:image/jpeg;base64,{screenshots[i]}",
-            )
-        self.assertEqual(user_parts[3]["text"], "Which monitor has the browser?")
+        # 3 labeled images (3 labels + 3 images) + 1 text prompt = 7 parts
+        self.assertEqual(len(user_parts), 7)
+        self.assertEqual(user_parts[0], {"type": "text", "text": "Screen 1 (Primary):"})
+        self.assertEqual(
+            user_parts[1]["image_url"]["url"],
+            f"data:image/jpeg;base64,{screenshots[0]}",
+        )
+        self.assertEqual(user_parts[2], {"type": "text", "text": "Screen 2:"})
+        self.assertEqual(
+            user_parts[3]["image_url"]["url"],
+            f"data:image/jpeg;base64,{screenshots[1]}",
+        )
+        self.assertEqual(user_parts[4], {"type": "text", "text": "Screen 3:"})
+        self.assertEqual(
+            user_parts[5]["image_url"]["url"],
+            f"data:image/jpeg;base64,{screenshots[2]}",
+        )
+        self.assertEqual(user_parts[6]["text"], "Which monitor has the browser?")
 
     def test_vision_not_supported_fallback(self):
         """Verify screenshots are stripped if model does not support vision."""

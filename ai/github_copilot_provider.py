@@ -624,21 +624,16 @@ class GitHubCopilotProvider(BaseLLMProvider):
         # Dynamic default — picks the best free + vision-capable model from
         # whatever GitHub currently exposes for this seat.
         model = model or pick_default_free_model()
+        supports_vis = self.supports_vision(model)
 
-        messages: list[dict] = [{"role": "system", "content": system_prompt}]
-        for msg in history:
-            messages.append({"role": msg.role, "content": msg.content})
-
-        # Vision: Copilot's OpenAI-compatible endpoint supports image_url parts
-        # on vision-capable models (gpt-4o, gpt-4o-mini). Encode as data URIs.
-        content_parts: list = []
-        for img_b64 in screenshots_b64:
-            content_parts.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
-            })
-        content_parts.append({"type": "text", "text": user_text})
-        messages.append({"role": "user", "content": content_parts if screenshots_b64 else user_text})
+        from ai.openai_compatible_provider import build_openai_messages
+        messages = build_openai_messages(
+            system_prompt=system_prompt,
+            history=history,
+            user_text=user_text,
+            screenshots_b64=screenshots_b64,
+            supports_vision=supports_vis,
+        )
 
         async with httpx.AsyncClient(timeout=120) as client:
             tok = await self._get_copilot_token(client)
