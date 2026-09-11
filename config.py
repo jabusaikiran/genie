@@ -107,6 +107,9 @@ class Config:
     openai_base_url: str = field(default_factory=lambda: os.getenv("OPENAI_BASE_URL", "").strip())
     openai_default_model: str = field(default_factory=lambda: os.getenv("OPENAI_DEFAULT_MODEL", "").strip())
     google_api_key: Optional[str] = field(default_factory=lambda: os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or None)
+    gemini_default_model: str = field(default_factory=lambda: os.getenv("GENIE_GEMINI_MODEL") or os.getenv("GEMINI_DEFAULT_MODEL", "gemini-2.5-flash"))
+    gemini_max_tokens: int = field(default_factory=lambda: int(os.getenv("GENIE_GEMINI_MAX_TOKENS") or os.getenv("GEMINI_MAX_TOKENS", "1024")))
+    gemini_temperature: float = field(default_factory=lambda: float(os.getenv("GENIE_GEMINI_TEMPERATURE") or os.getenv("GEMINI_TEMPERATURE", "0.7")))
     ollama_host: str = field(default_factory=lambda: os.getenv("OLLAMA_HOST", "http://localhost:11434"))
     # Legacy single-model knob — still respected as a fallback for both slots
     # below. New users should prefer OLLAMA_VISION_MODEL / OLLAMA_TEXT_MODEL.
