@@ -104,7 +104,13 @@ class AmbientListener:
 
     def _open_stream(self):
         if self._stream is not None:
-            return
+            try:
+                if getattr(self._stream, "active", False):
+                    return
+            except Exception:
+                pass
+            self._close_stream()
+
         try:
             self._stream = sd.InputStream(
                 samplerate=SAMPLE_RATE,
@@ -115,9 +121,10 @@ class AmbientListener:
                 device=self._device,
             )
             self._stream_rate = SAMPLE_RATE
+            self._stream.start()
         except Exception:
-            # Device doesn't support 16kHz directly — open at its native
-            # rate and resample every block to 16kHz for Whisper.
+            # Device doesn't support 16kHz directly or first attempt failed — try native rate
+            self._close_stream()
             info = sd.query_devices(self._device, "input")
             native_rate = int(info["default_samplerate"])
             self._stream_rate = native_rate
@@ -129,7 +136,7 @@ class AmbientListener:
                 callback=self._callback,
                 device=self._device,
             )
-        self._stream.start()
+            self._stream.start()
 
     def stop(self):
         self._running = False
@@ -156,6 +163,8 @@ class AmbientListener:
         if not self._running:
             self._running = True
         self._open_stream()
+        if self._stream is None or not getattr(self._stream, "active", False):
+            raise RuntimeError("Failed to open audio input stream.")
 
     def stop_recording(self) -> bytes:
         """Return buffered PCM16 bytes and resume standby."""

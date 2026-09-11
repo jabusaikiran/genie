@@ -128,12 +128,55 @@ def _setup_logging():
         pass  # logging must never block startup
 
 
+_single_instance_mutex = None
+
+
+def _acquire_single_instance_mutex() -> bool:
+    """Ensure only one instance of Genie runs at a time via a Win32 named mutex.
+    Returns True if this is the only instance, False if another instance exists.
+    """
+    global _single_instance_mutex
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        ERROR_ALREADY_EXISTS = 183
+        mutex_name = "Global\\Genie_AI_Companion_SingleInstance"
+        mutex = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
+        last_err = ctypes.windll.kernel32.GetLastError()
+        if last_err == ERROR_ALREADY_EXISTS:
+            if mutex:
+                ctypes.windll.kernel32.CloseHandle(mutex)
+            return False
+        _single_instance_mutex = mutex
+        return True
+    except Exception:
+        # Non-critical failure in mutex acquisition should not block startup
+        return True
+
+
+def _release_single_instance_mutex() -> None:
+    global _single_instance_mutex
+    if _single_instance_mutex:
+        try:
+            import ctypes
+            ctypes.windll.kernel32.CloseHandle(_single_instance_mutex)
+        except Exception:
+            pass
+        _single_instance_mutex = None
+
+
 def main():
+    if not _acquire_single_instance_mutex():
+        print("Genie is already running. Exiting.")
+        sys.exit(0)
+
     _setup_logging()
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(sys.argv)
+    app.aboutToQuit.connect(_release_single_instance_mutex)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("Genie")
     app.setApplicationDisplayName("Genie - AI Companion")
@@ -180,6 +223,7 @@ def main():
     _log_hint = Path(
         os.environ.get("LOCALAPPDATA", Path.home())
     ) / "Genie" / "genie.log"
+    manager.sig_error.connect(panel.show_error)
     manager.sig_error.connect(
         lambda e: tray.show_notification(
             "Genie error", f"{e}\n\nFull details: {_log_hint}"
@@ -413,7 +457,13 @@ def main():
             tray.show_notification("Diagnostics failed", str(e))
     tray.on_diagnostics.connect(_save_diagnostics)
 
-    tray.on_quit.connect(lambda: (tray.hide_icon(), manager.shutdown(), app.quit()))
+    def _on_quit():
+        tray.hide_icon()
+        manager.shutdown()
+        _release_single_instance_mutex()
+        app.quit()
+
+    tray.on_quit.connect(_on_quit)
 
     # ── Global hotkey ─────────────────────────────────────────────────────────
     hotkey = GlobalHotkeyMonitor(
@@ -428,6 +478,9 @@ def main():
 
     # ── Show UI + start listener ──────────────────────────────────────────────
     overlay.show()        # persistent overlay (cursor follow)
+    app.screenAdded.connect(lambda _s: overlay._cover_all_monitors())
+    app.screenRemoved.connect(lambda _s: overlay._cover_all_monitors())
+    app.primaryScreenChanged.connect(lambda _s: overlay._cover_all_monitors())
     # Panel is hidden by default — user can open it from the tray menu if needed
     manager.start()        # begin ambient mic + wake-word scanning
 

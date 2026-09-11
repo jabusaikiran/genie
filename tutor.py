@@ -216,7 +216,7 @@ IDENTITY_RE = re.compile(
 
 SCREEN_CONTEXT_TOKENS_RE = re.compile(
     r"\b(screen|this|that|error|button|icon|code|image|picture|diagram|"
-    r"chart|window|dialog|line|symbol|syntax|menu|cursor|here)\b",
+    r"chart|window|dialog|line|symbol|syntax|menu|cursor|here|click)\b",
     re.IGNORECASE,
 )
 
@@ -230,6 +230,44 @@ def is_identity_question(q: str) -> bool:
     if SCREEN_CONTEXT_TOKENS_RE.search(stripped):
         return False
     return IDENTITY_RE.match(stripped) is not None
+
+
+WEB_SEARCH_EXPLICIT_RE = re.compile(
+    r"\b(search(\s+for|\s+the\s+web|\s+online|\s+google)?|"
+    r"google(\s+for)?|"
+    r"look\s*up|"
+    r"browse(\s+the\s+web|\s+online)?|"
+    r"on\s+the\s+web|online|internet|"
+    r"latest|recent\s+news|current\s+price|weather)\b",
+    re.IGNORECASE,
+)
+
+
+def is_web_search_needed(transcript: str, locate_triggered: bool = False) -> bool:
+    """Decision hierarchy for web search:
+    1. Explicit web/search intent -> allow web search.
+    2. Screen/UI/deictic/local-context question -> skip web search.
+    3. Otherwise -> preserve existing behavior (allow if search enabled).
+    """
+    if not transcript:
+        return False
+    q = transcript.strip()
+
+    # 1. Explicit web/search intent (or identity questions that drop screenshots)
+    if WEB_SEARCH_EXPLICIT_RE.search(q) or is_identity_question(q):
+        return True
+
+    # 2. Screen/UI/deictic/local-context question -> skip
+    if (
+        locate_triggered
+        or is_locate(q)
+        or is_deictic(q)
+        or SCREEN_CONTEXT_TOKENS_RE.search(q) is not None
+    ):
+        return False
+
+    # 3. Otherwise allow
+    return True
 
 
 def is_repeat(q: str) -> bool:

@@ -379,6 +379,16 @@ class CompanionPanel(QWidget):
         self._response_text = ""
         self._response_label.setText("")
 
+    def show_error(self, message: str):
+        """Display an error in the response area and update status label."""
+        self._response_text = f"Error:\n\n{message}"
+        self._response_label.setText(self._response_text)
+        self._status_label.setText("Error")
+        err_color = QColor(255, 80, 80)
+        self._status_dot.setStyleSheet(
+            f"color: rgb({err_color.red()},{err_color.green()},{err_color.blue()}); font-size: 10px;"
+        )
+
     def show_copilot_code(self, user_code: str, verification_uri: str):
         """Thread-safe: can be called from any thread. Emits a queued signal
         so the UI update always runs on the Qt main thread."""

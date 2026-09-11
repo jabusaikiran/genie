@@ -7,6 +7,7 @@ Orchestrates:
 """
 
 import asyncio
+import concurrent.futures
 import logging
 import math
 import re
@@ -29,6 +30,7 @@ from tutor import (
     is_locate, is_multistep, is_next, is_stop, is_sensitive_window,
     is_repeat, is_journal_today, is_journal_week, is_quiz_review,
     is_identity_question, get_sensitive_monitor_indices,
+    is_web_search_needed,
 )
 from tutor_features import (
     journal, pdf_context, ocr, code_mode, lesson_recorder,
@@ -505,8 +507,12 @@ class CompanionManager(QObject):
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
 
         def _observe(f):
+            if f.cancelled():
+                return
             try:
                 f.result()
+            except (asyncio.CancelledError, concurrent.futures.CancelledError):
+                return
             except Exception as e:
                 # A swallowed exception here used to leave the UI stuck on
                 # "Listening..." forever (GitHub issue #6). Surface it and
@@ -908,7 +914,7 @@ class CompanionManager(QObject):
 
             search_task = None
             locate_task = None
-            if self._web_search_enabled:
+            if self._web_search_enabled and is_web_search_needed(transcript, locate_triggered=locate_triggered):
                 from ai.web_search import search
                 search_task = asyncio.create_task(search(transcript))
 
@@ -982,7 +988,11 @@ class CompanionManager(QObject):
             search_results = ""
             if search_task:
                 try:
-                    search_results = await search_task or ""
+                    search_results = await asyncio.wait_for(search_task, timeout=2.0) or ""
+                except (asyncio.TimeoutError, TimeoutError):
+                    if not search_task.done():
+                        search_task.cancel()
+                    search_results = ""
                 except Exception:
                     search_results = ""
 

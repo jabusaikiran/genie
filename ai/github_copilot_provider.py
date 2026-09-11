@@ -547,11 +547,10 @@ class GitHubCopilotProvider(BaseLLMProvider):
     display_name = "GitHub Copilot"
 
     def __init__(self):
-        self._gh_token = load_github_token()
-        if not self._gh_token:
-            raise RuntimeError(
-                "GitHub Copilot not signed in. Run:  python -m ai.github_copilot_provider login"
-            )
+        try:
+            self._gh_token = load_github_token()
+        except Exception:
+            self._gh_token = None
         self._copilot_token: Optional[str] = None
         self._copilot_token_expires: float = 0.0
 
@@ -578,6 +577,19 @@ class GitHubCopilotProvider(BaseLLMProvider):
         )
 
     async def _get_copilot_token(self, client: httpx.AsyncClient) -> str:
+        if not self._gh_token:
+            try:
+                self._gh_token = load_github_token()
+            except Exception:
+                self._gh_token = None
+        if not self._gh_token:
+            from ai.openai_compatible_provider import AuthenticationError
+            raise AuthenticationError(
+                "GitHub Copilot is not signed in. Please sign in via Tray → Model → Sign in to GitHub Copilot…",
+                provider="copilot",
+                status_code=401,
+            )
+
         # Short-lived token, refresh with ~2 min buffer
         if self._copilot_token and time.time() < self._copilot_token_expires - 120:
             return self._copilot_token
@@ -591,9 +603,11 @@ class GitHubCopilotProvider(BaseLLMProvider):
             },
         )
         if r.status_code == 401:
-            raise RuntimeError(
-                "GitHub rejected your token. Sign in again: Tray → Model → "
-                "Sign in to GitHub Copilot…"
+            from ai.openai_compatible_provider import AuthenticationError
+            raise AuthenticationError(
+                "GitHub rejected your token (401). Please sign in again via Tray → Model → Sign in to GitHub Copilot…",
+                provider="copilot",
+                status_code=401,
             )
         if r.status_code == 403:
             body = (r.text or "")[:300]
@@ -621,6 +635,18 @@ class GitHubCopilotProvider(BaseLLMProvider):
         system_prompt: str,
         model: str | None = None,
     ) -> AsyncIterator[str]:
+        if not self._gh_token:
+            try:
+                self._gh_token = load_github_token()
+            except Exception:
+                self._gh_token = None
+        if not self._gh_token:
+            from ai.openai_compatible_provider import AuthenticationError
+            raise AuthenticationError(
+                "GitHub Copilot is not signed in. Please sign in via Tray → Model → Sign in to GitHub Copilot…",
+                provider="copilot",
+                status_code=401,
+            )
         # Dynamic default — picks the best free + vision-capable model from
         # whatever GitHub currently exposes for this seat.
         model = model or pick_default_free_model()
