@@ -24,7 +24,8 @@ from audio.ambient_listener import AmbientListener
 from screen.capture import capture_all_screens
 from ui.panel import AppState
 from tutor import (
-    active_window_title, app_key,
+    active_window_title, active_window_info, app_key,
+    cursor_position, find_monitor_for_point, get_element_at_point, is_deictic,
     is_locate, is_multistep, is_next, is_stop, is_sensitive_window,
     is_repeat, is_journal_today, is_journal_week, is_quiz_review,
     is_identity_question,
@@ -43,6 +44,9 @@ from ai.provider_factory import get_provider, _ensure_ollama_running
 
 def _build_system_prompt(
     window_title: str = "",
+    active_screen_idx: int = 1,
+    screen_count: int = 1,
+    cursor_info: Optional[str] = None,
     lesson_step: int = 0,
     total_steps: int = 0,
     quiz_mode: bool = False,
@@ -54,14 +58,28 @@ def _build_system_prompt(
     today = datetime.now().strftime("%A, %B %d, %Y")
     ctx_lines = [f"TODAY'S DATE: {today}."]
     if window_title:
-        ctx_lines.append(f'ACTIVE WINDOW: "{window_title}"')
+        if screen_count > 1:
+            ctx_lines.append(f'ACTIVE WINDOW: "{window_title}" (on Screen {active_screen_idx})')
+        else:
+            ctx_lines.append(f'ACTIVE WINDOW: "{window_title}"')
+    if cursor_info:
+        ctx_lines.append(cursor_info)
     if detected_coord:
-        x, y, label = detected_coord
-        ctx_lines.append(
-            f"DETECTED ELEMENT (pre-computed by the pointing engine — use "
-            f"this coordinate verbatim in your [POINT] tag): x={x}, y={y}, "
-            f"label='{label}'. (Already normalized 0-1000.)"
-        )
+        if len(detected_coord) >= 4:
+            x, y, label, scr_idx = detected_coord[:4]
+            scr_hint = f":screen{scr_idx}" if screen_count > 1 else ""
+            ctx_lines.append(
+                f"DETECTED ELEMENT (pre-computed by the pointing engine — use "
+                f"this coordinate verbatim in your [POINT] tag): x={x}, y={y}, "
+                f"label='{label}'{scr_hint}. (Already normalized 0-1000.)"
+            )
+        else:
+            x, y, label = detected_coord[:3]
+            ctx_lines.append(
+                f"DETECTED ELEMENT (pre-computed by the pointing engine — use "
+                f"this coordinate verbatim in your [POINT] tag): x={x}, y={y}, "
+                f"label='{label}'. (Already normalized 0-1000.)"
+            )
     if total_steps > 1:
         ctx_lines.append(
             f"LESSON PROGRESS: step {lesson_step + 1} of {total_steps}. "
@@ -161,7 +179,7 @@ def _speakable(text: str) -> str:
     return t
 
 
-POINT_RE = re.compile(r'\[POINT:(\d+),(\d+):([^:\]]+):screen(\d+)\]')
+POINT_RE = re.compile(r'\[POINT:(\d+),(\d+):([^:\]]+?)(?::screen(\d+))?\]')
 # A partial "[POINT..." prefix that hasn't closed yet — hold it back from display
 # until the next chunk so we never leak a half tag.
 POINT_PARTIAL_RE = re.compile(r'\[(?:P|PO|POI|POIN|POINT|POINT:[^\]]*)?$')
@@ -170,17 +188,18 @@ POINT_PARTIAL_RE = re.compile(r'\[(?:P|PO|POI|POIN|POINT|POINT:[^\]]*)?$')
 # ALL coordinates are normalized 0-1000 relative to the screenshot the model
 # saw (x: 0=left edge, 1000=right edge; y: 0=top, 1000=bottom). The manager
 # converts to logical screen pixels via _denorm(). Trailing :color is optional
-# on every shape.
+# on every shape. Optional :screenN directs the shape to a specific monitor.
 _C = r'(?::([a-z]+))?'                       # optional trailing color group
-LINE_RE      = re.compile(r'\[LINE:(\d+),(\d+)->(\d+),(\d+)' + _C + r'\]')
-ARROW_RE     = re.compile(r'\[ARROW:(\d+),(\d+)->(\d+),(\d+)' + _C + r'\]')
-CIRCLE_RE    = re.compile(r'\[CIRCLE:(\d+),(\d+),(\d+)(?::([^:\]]*))?' + _C + r'\]')
-RECT_RE      = re.compile(r'\[RECT:(\d+),(\d+),(\d+),(\d+)' + _C + r'\]')
-POLY_RE      = re.compile(r'\[POLY:((?:\d+,\d+[ ]*)+)' + _C + r'\]')
-TEXT_RE      = re.compile(r'\[TEXT:(\d+),(\d+):([^:\]]+)' + _C + r'(?::(s|m|l))?\]')
-ANGLE_RE     = re.compile(r'\[ANGLE:(\d+),(\d+),(\d+)(?:,(-?\d+))?' + _C + r'\]')
-UNDERLINE_RE = re.compile(r'\[UNDERLINE:(\d+),(\d+),(\d+)' + _C + r'\]')
-LABEL_RE     = re.compile(r'\[LABEL:(\d+),(\d+):([^:\]]+)' + _C + r'\]')
+_S = r'(?::screen(\d+))?'                    # optional trailing screen group
+LINE_RE      = re.compile(r'\[LINE:(\d+),(\d+)->(\d+),(\d+)' + _C + _S + r'\]')
+ARROW_RE     = re.compile(r'\[ARROW:(\d+),(\d+)->(\d+),(\d+)' + _C + _S + r'\]')
+CIRCLE_RE    = re.compile(r'\[CIRCLE:(\d+),(\d+),(\d+)(?::([^:\]]*))?' + _C + _S + r'\]')
+RECT_RE      = re.compile(r'\[RECT:(\d+),(\d+),(\d+),(\d+)' + _C + _S + r'\]')
+POLY_RE      = re.compile(r'\[POLY:((?:\d+,\d+[ ]*)+)' + _C + _S + r'\]')
+TEXT_RE      = re.compile(r'\[TEXT:(\d+),(\d+):([^:\]]+)' + _C + r'(?::(s|m|l))?' + _S + r'\]')
+ANGLE_RE     = re.compile(r'\[ANGLE:(\d+),(\d+),(\d+)(?:,(-?\d+))?' + _C + _S + r'\]')
+UNDERLINE_RE = re.compile(r'\[UNDERLINE:(\d+),(\d+),(\d+)' + _C + _S + r'\]')
+LABEL_RE     = re.compile(r'\[LABEL:(\d+),(\d+):([^:\]]+)' + _C + _S + r'\]')
 CLEAR_RE     = re.compile(r'\[CLEAR\]')
 # Anchor forms — element resolved by name via the hybrid pointer (UIA), so
 # the model never guesses coordinates for real UI: [CIRCLE:@Save button]
@@ -695,7 +714,8 @@ class CompanionManager(QObject):
                 self.stop()
                 return
 
-            title = active_window_title()
+            win_info = active_window_info()
+            title = win_info.get("title", "")
             ak = app_key(title)
 
             # Voice commands are one or two words, so they cannot come from a
@@ -775,16 +795,37 @@ class CompanionManager(QObject):
             self._screens_ctx = screenshots
             self.sig_clear_drawings.emit()
 
+            # Active monitor hosting the active window
+            active_scr_idx = find_monitor_for_point(win_info.get("center"), screenshots)
+            self._active_screen_idx = active_scr_idx
+            active_shot = self._shot(active_scr_idx) or (screenshots[0] if screenshots else None)
+
+            # Cursor position context & deictic inspection
+            cursor_pt = cursor_position()
+            cursor_scr_idx = find_monitor_for_point(cursor_pt, screenshots)
+            c_shot = self._shot(cursor_scr_idx)
+            cursor_info_str = None
+            if c_shot:
+                rel_cx = cursor_pt[0] - c_shot.physical_left
+                rel_cy = cursor_pt[1] - c_shot.physical_top
+                norm_cx = max(0, min(1000, int(round(rel_cx / max(c_shot.physical_width, 1) * 1000))))
+                norm_cy = max(0, min(1000, int(round(rel_cy / max(c_shot.physical_height, 1) * 1000))))
+                c_line = f"CURSOR: Screen {cursor_scr_idx}, x={norm_cx}, y={norm_cy}."
+                if is_deictic(transcript):
+                    elem_desc = get_element_at_point(cursor_pt[0], cursor_pt[1])
+                    if elem_desc:
+                        c_line += f" ELEMENT UNDER CURSOR: {elem_desc}."
+                cursor_info_str = c_line
+
             # Local figure detection (OpenCV) — finds triangles/rects/circles
-            # with EXACT normalized vertices so any LLM (even small Ollama
-            # models) can draw on them accurately by echoing the numbers.
+            # on the active monitor with EXACT normalized vertices.
             self._figures_ctx = []
             fig_extra = ""
-            if screenshots:
+            if active_shot:
                 try:
                     from ai.figure_detector import detect_figures, figures_prompt
                     self._figures_ctx = await asyncio.to_thread(
-                        detect_figures, screenshots[0].base64_jpeg,
+                        detect_figures, active_shot.base64_jpeg,
                     )
                     fig_extra = figures_prompt(self._figures_ctx)
                 except Exception:
@@ -807,8 +848,8 @@ class CompanionManager(QObject):
                 from ai.web_search import search
                 search_task = asyncio.create_task(search(transcript))
 
-            if screenshots and locate_triggered:
-                shot = screenshots[0]
+            if active_shot and locate_triggered:
+                shot = active_shot
                 # Pointing accuracy upgrade: try the hybrid pointer first.
                 # Tier 1 (UIA tree) is ~5ms and pixel-perfect; tier 2 (OCR)
                 # handles canvas apps. Falls through to the vision LLM grid
@@ -890,10 +931,11 @@ class CompanionManager(QObject):
             if detected:
                 # Short label guess — first noun phrase after "the"/"where"
                 label = _guess_label(transcript)
+                detected_screen = getattr(detected, "screen_index", active_scr_idx)
                 # Prompt wants NORMALIZED 0-1000 coords (the model echoes them
                 # into [POINT:...] which _parse_points denormalizes back).
-                ndx, ndy = self._norm(detected.x, detected.y)
-                detected_coord = (ndx, ndy, label)
+                ndx, ndy = self._norm(detected.x, detected.y, detected_screen)
+                detected_coord = (ndx, ndy, label, detected_screen)
                 # Fire the overlay NOW so the buddy flies over while the LLM
                 # still thinks. Hold dwell until TTS completes.
                 self.sig_point_hold.emit(True)
@@ -912,10 +954,10 @@ class CompanionManager(QObject):
 
             # OCR fallback for fine print (only if user actually asks to read)
             ocr_extra = ""
-            if self._ocr_enabled and screenshots and ocr.needs_ocr(transcript):
+            if self._ocr_enabled and active_shot and ocr.needs_ocr(transcript):
                 try:
                     import base64
-                    jpeg = base64.b64decode(screenshots[0].base64_jpeg)
+                    jpeg = base64.b64decode(active_shot.base64_jpeg)
                     txt = ocr.run_ocr(jpeg)
                     if txt:
                         ocr_extra = ocr.format_for_prompt(txt)
@@ -926,6 +968,9 @@ class CompanionManager(QObject):
             base_extra = ocr_extra + fig_extra
             system_base = _build_system_prompt(
                 window_title=title,
+                active_screen_idx=active_scr_idx,
+                screen_count=len(screenshots),
+                cursor_info=cursor_info_str,
                 lesson_step=self._lesson_step_idx,
                 total_steps=len(self._lesson_steps),
                 quiz_mode=self._quiz_mode,
@@ -1128,13 +1173,20 @@ class CompanionManager(QObject):
     # it saw. The overlay draws in LOGICAL screen pixels. These helpers convert
     # between the two using the ScreenShot metadata captured this turn.
 
-    def _shot(self, screen_idx: int = 1):
+    # ── Coordinate mapping ────────────────────────────────────────────────────
+    #
+    # The LLM emits NORMALIZED 0-1000 coordinates relative to the screenshot
+    # it saw. The overlay draws in LOGICAL screen pixels. These helpers convert
+    # between the two using the ScreenShot metadata captured this turn.
+
+    def _shot(self, screen_idx: int | None = None):
+        target_idx = screen_idx if screen_idx is not None else getattr(self, "_active_screen_idx", 1)
         for s in self._screens_ctx:
-            if s.index == screen_idx:
+            if s.index == target_idx:
                 return s
         return self._screens_ctx[0] if self._screens_ctx else None
 
-    def _denorm(self, nx: float, ny: float, screen_idx: int = 1):
+    def _denorm(self, nx: float, ny: float, screen_idx: int | None = None):
         """Normalized 0-1000 (screenshot space) → logical screen pixels."""
         shot = self._shot(screen_idx)
         if shot is None:
@@ -1149,14 +1201,14 @@ class CompanionManager(QObject):
         y = shot.logical_top + (ny / by) * log_h
         return x, y
 
-    def _denorm_len(self, n: float, screen_idx: int = 1) -> float:
+    def _denorm_len(self, n: float, screen_idx: int | None = None) -> float:
         """Normalized length (0-1000 x-units) → logical pixels."""
         shot = self._shot(screen_idx)
         if shot is None:
             return float(n)
         return (n / 1000.0) * (shot.physical_width / shot.dpi_scale)
 
-    def _norm(self, x: float, y: float, screen_idx: int = 1):
+    def _norm(self, x: float, y: float, screen_idx: int | None = None):
         """Logical screen pixels → normalized 0-1000 (for prompt injection)."""
         shot = self._shot(screen_idx)
         if shot is None:
@@ -1174,7 +1226,7 @@ class CompanionManager(QObject):
             t = find_target(name, skip_ocr=True, skip_vision=True)
             if t is None:
                 return None
-            shot = self._shot(1)
+            shot = self._shot(getattr(self, "_active_screen_idx", 1))
             scale = (shot.dpi_scale if shot else 1.0) or 1.0
             l, tp, r, b = t.bbox
             return (l / scale, tp / scale, r / scale, b / scale)
@@ -1186,7 +1238,8 @@ class CompanionManager(QObject):
         tags are deferred and played back in sync with narration."""
         for match in POINT_RE.finditer(text):
             x, y, label, scr = match.groups()
-            lx, ly = self._denorm(float(x), float(y), int(scr))
+            screen_idx = int(scr) if scr else getattr(self, "_active_screen_idx", 1)
+            lx, ly = self._denorm(float(x), float(y), screen_idx)
             self.sig_point_at.emit(lx, ly, label.strip())
         if CLEAR_RE.search(text):
             self.sig_clear_drawings.emit()
@@ -1252,60 +1305,68 @@ class CompanionManager(QObject):
         m = LINE_RE.fullmatch(tag) or ARROW_RE.fullmatch(tag)
         if m:
             kind = "line" if tag.startswith("[LINE") else "arrow"
-            x1, y1, x2, y2, color = m.groups()
+            x1, y1, x2, y2, color, scr = m.groups()
+            screen_idx = int(scr) if scr else getattr(self, "_active_screen_idx", 1)
             n1 = self._snap_pt(float(x1), float(y1))
             n2 = self._snap_pt(float(x2), float(y2))
-            return {"kind": kind, "pts": [self._denorm(*n1), self._denorm(*n2)],
+            return {"kind": kind, "pts": [self._denorm(*n1, screen_idx), self._denorm(*n2, screen_idx)],
                     "color": color or "blue"}
         m = CIRCLE_RE.fullmatch(tag)
         if m:
-            x, y, r, label, color = m.groups()
-            cx, cy = self._denorm(float(x), float(y))
+            x, y, r, label, color, scr = m.groups()
+            screen_idx = int(scr) if scr else getattr(self, "_active_screen_idx", 1)
+            cx, cy = self._denorm(float(x), float(y), screen_idx)
             return {"kind": "circle", "x": cx, "y": cy,
-                    "r": max(12.0, self._denorm_len(float(r))),
+                    "r": max(12.0, self._denorm_len(float(r), screen_idx)),
                     "label": (label or "").strip(), "color": color or "blue"}
         m = RECT_RE.fullmatch(tag)
         if m:
-            x1, y1, x2, y2, color = m.groups()
-            p1 = self._denorm(*self._snap_pt(float(x1), float(y1)))
-            p2 = self._denorm(*self._snap_pt(float(x2), float(y2)))
+            x1, y1, x2, y2, color, scr = m.groups()
+            screen_idx = int(scr) if scr else getattr(self, "_active_screen_idx", 1)
+            p1 = self._denorm(*self._snap_pt(float(x1), float(y1)), screen_idx)
+            p2 = self._denorm(*self._snap_pt(float(x2), float(y2)), screen_idx)
             return {"kind": "rect", "x1": p1[0], "y1": p1[1],
                     "x2": p2[0], "y2": p2[1], "color": color or "blue"}
         m = POLY_RE.fullmatch(tag)
         if m:
-            pts_str, color = m.groups()
-            pts = [self._denorm(*self._snap_pt(float(a), float(b)))
+            pts_str, color, scr = m.groups()
+            screen_idx = int(scr) if scr else getattr(self, "_active_screen_idx", 1)
+            pts = [self._denorm(*self._snap_pt(float(a), float(b)), screen_idx)
                    for a, b in re.findall(r'(\d+),(\d+)', pts_str)]
             if len(pts) < 3:
                 return None
             return {"kind": "poly", "pts": pts, "color": color or "blue"}
         m = TEXT_RE.fullmatch(tag)
         if m:
-            x, y, content, color, size = m.groups()
-            lx, ly = self._denorm(float(x), float(y))
+            x, y, content, color, size, scr = m.groups()
+            screen_idx = int(scr) if scr else getattr(self, "_active_screen_idx", 1)
+            lx, ly = self._denorm(float(x), float(y), screen_idx)
             return {"kind": "text", "x": lx, "y": ly, "text": content.strip(),
                     "color": color or "blue", "size": size or "m"}
         m = ANGLE_RE.fullmatch(tag)
         if m:
-            x, y, s, rot, color = m.groups()
+            x, y, s, rot, color, scr = m.groups()
+            screen_idx = int(scr) if scr else getattr(self, "_active_screen_idx", 1)
             nx, ny = self._snap_pt(float(x), float(y))
             auto_rot = self._angle_rot_for_vertex(nx, ny)
-            lx, ly = self._denorm(nx, ny)
+            lx, ly = self._denorm(nx, ny, screen_idx)
             return {"kind": "angle", "x": lx, "y": ly,
-                    "s": max(10.0, self._denorm_len(float(s))),
+                    "s": max(10.0, self._denorm_len(float(s), screen_idx)),
                     "rot": auto_rot if auto_rot is not None else float(rot or 0),
                     "color": color or "blue"}
         m = UNDERLINE_RE.fullmatch(tag)
         if m:
-            x, y, w, color = m.groups()
-            lx, ly = self._denorm(float(x), float(y))
+            x, y, w, color, scr = m.groups()
+            screen_idx = int(scr) if scr else getattr(self, "_active_screen_idx", 1)
+            lx, ly = self._denorm(float(x), float(y), screen_idx)
             return {"kind": "underline", "x": lx, "y": ly,
-                    "w": max(8.0, self._denorm_len(float(w))),
+                    "w": max(8.0, self._denorm_len(float(w), screen_idx)),
                     "color": color or "blue"}
         m = LABEL_RE.fullmatch(tag)
         if m:
-            x, y, txt, color = m.groups()
-            lx, ly = self._denorm(float(x), float(y))
+            x, y, txt, color, scr = m.groups()
+            screen_idx = int(scr) if scr else getattr(self, "_active_screen_idx", 1)
+            lx, ly = self._denorm(float(x), float(y), screen_idx)
             return {"kind": "text", "x": lx, "y": ly, "text": txt.strip(),
                     "color": color or "blue", "size": "s"}
         return None

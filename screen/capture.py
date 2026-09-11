@@ -65,10 +65,37 @@ def _query_dpi_scale() -> float:
         return 1.0
 
 
-def capture_all_screens(max_width: int = 1280) -> List[ScreenShot]:
+def query_monitor_dpi(phys_left: int = 0, phys_top: int = 0, phys_width: int = 1920, phys_height: int = 1080) -> float:
+    """Best-effort per-monitor DPI scale.
+    Queries GetDpiForMonitor via Shcore when available, falling back to system DPI scale."""
+    try:
+        from ctypes import wintypes
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG),
+            ]
+        u = ctypes.windll.user32
+        r = RECT(phys_left, phys_top, phys_left + max(phys_width, 1), phys_top + max(phys_height, 1))
+        h_mon = u.MonitorFromRect(ctypes.byref(r), 2)  # MONITOR_DEFAULTTONEAREST
+        if h_mon:
+            shcore = getattr(ctypes.windll, "shcore", None)
+            if shcore and hasattr(shcore, "GetDpiForMonitor"):
+                dpi_x = wintypes.UINT()
+                dpi_y = wintypes.UINT()
+                if shcore.GetDpiForMonitor(h_mon, 0, ctypes.byref(dpi_x), ctypes.byref(dpi_y)) == 0:
+                    if dpi_x.value > 0:
+                        return max(1.0, dpi_x.value / 96.0)
+    except Exception:
+        pass
+    return _query_dpi_scale()
+
+
+def capture_all_screens(max_width: int = 1920, quality: int = 85) -> List[ScreenShot]:
     """Capture all monitors. Each ScreenShot carries everything needed
     to convert detection coords back into logical screen space."""
-    dpi = _query_dpi_scale()
     results = []
     with mss.mss() as sct:
         # mss monitor index 0 is the combined virtual screen; 1+ are real monitors
@@ -79,6 +106,7 @@ def capture_all_screens(max_width: int = 1280) -> List[ScreenShot]:
             phys_w, phys_h = img.width, img.height
             phys_left = int(monitor.get("left", 0))
             phys_top  = int(monitor.get("top",  0))
+            dpi = query_monitor_dpi(phys_left, phys_top, phys_w, phys_h)
 
             # Downscale only the JPEG we send to the LLM — keep physical numbers intact
             if img.width > max_width:
@@ -89,7 +117,7 @@ def capture_all_screens(max_width: int = 1280) -> List[ScreenShot]:
                 )
 
             buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=75, optimize=True)
+            img.save(buf, format="JPEG", quality=quality, optimize=True)
             encoded = base64.b64encode(buf.getvalue()).decode("utf-8")
 
             results.append(ScreenShot(
@@ -109,9 +137,9 @@ def capture_all_screens(max_width: int = 1280) -> List[ScreenShot]:
     return results
 
 
-def capture_primary() -> ScreenShot:
+def capture_primary(max_width: int = 1920, quality: int = 85) -> ScreenShot:
     """Capture only the primary monitor."""
-    screens = capture_all_screens()
+    screens = capture_all_screens(max_width=max_width, quality=quality)
     return screens[0] if screens else None
 
 

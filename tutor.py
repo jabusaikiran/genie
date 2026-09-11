@@ -14,15 +14,90 @@ from ctypes import wintypes
 # ── Active-window title (for per-app context memory) ─────────────────────────
 
 def active_window_title() -> str:
+    info = active_window_info()
+    return info.get("title", "")
+
+
+def active_window_info() -> dict:
+    """Return title, physical rect (l, t, r, b), and physical center (cx, cy) of active window."""
     try:
         u = ctypes.windll.user32
         hwnd = u.GetForegroundWindow()
         if not hwnd:
-            return ""
+            return {"title": "", "rect": None, "center": None}
         n = u.GetWindowTextLengthW(hwnd)
         buf = ctypes.create_unicode_buffer(n + 1)
         u.GetWindowTextW(hwnd, buf, n + 1)
-        return buf.value or ""
+        title = buf.value or ""
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG),
+            ]
+        rect = RECT()
+        u.GetWindowRect(hwnd, ctypes.byref(rect))
+        cx = int((rect.left + rect.right) // 2)
+        cy = int((rect.top + rect.bottom) // 2)
+        return {
+            "title": title,
+            "rect": (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)),
+            "center": (cx, cy),
+        }
+    except Exception:
+        return {"title": "", "rect": None, "center": None}
+
+
+def cursor_position() -> tuple[int, int]:
+    """Return the physical screen coordinates of the cursor."""
+    try:
+        class POINT(ctypes.Structure):
+            _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+        pt = POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+        return int(pt.x), int(pt.y)
+    except Exception:
+        return 0, 0
+
+
+def find_monitor_for_point(point: tuple[int, int] | None, screens: list) -> int:
+    """Find the ScreenShot index (1-based) containing the physical point (x, y)."""
+    if not screens:
+        return 1
+    if not point:
+        return screens[0].index
+    px, py = point
+    for s in screens:
+        if (s.physical_left <= px < s.physical_left + s.physical_width and
+            s.physical_top <= py < s.physical_top + s.physical_height):
+            return s.index
+    return screens[0].index
+
+
+def get_element_at_point(x: int, y: int) -> str:
+    """Safely query UIA for the control at physical coordinates (x, y)."""
+    try:
+        import uiautomation as auto
+        ctrl = auto.ControlFromPoint(x, y)
+        if ctrl is None:
+            return ""
+        name = (ctrl.Name or "").strip()
+        ctrl_type = (ctrl.ControlTypeName or "").replace("Control", "").strip()
+        help_text = (getattr(ctrl, "HelpText", "") or "").strip()
+
+        if not name and not help_text:
+            return ""
+
+        parts = []
+        if ctrl_type:
+            parts.append(ctrl_type)
+        if name:
+            parts.append(f'"{name}"')
+        if help_text and help_text.lower() != name.lower():
+            parts.append(f"({help_text})")
+        return " ".join(parts).strip()
     except Exception:
         return ""
 
@@ -62,6 +137,20 @@ NEXT_RE = re.compile(r"^\s*(next|continue|go\s*on|keep\s*going|what'?s?\s*next)[
 
 STOP_RE = re.compile(r"^\s*(stop|quit|cancel|never\s*mind|nevermind)[\s.!?]*$",
                      re.IGNORECASE)
+
+DEICTIC_RE = re.compile(
+    r"\b(what\s+(is|does|are)\s+(this|that|it|here)|"
+    r"what('s|\s+is)\s+(this|that|the)\s+(button|icon|symbol|thing|tool|item|option|setting|switch)|"
+    r"what\s+does\s+this\s+(button|icon|symbol|tool|switch|option)?\s*(do|mean)?|"
+    r"explain\s+(this|that)\s+(button|icon|element|symbol|error|message|window|dialog|text|panel)|"
+    r"what\s+am\s+i\s+looking\s+at)\b",
+    re.IGNORECASE,
+)
+
+
+def is_deictic(transcript: str) -> bool:
+    """Return True if the question is a deictic reference ('What is this?', 'What does this button do?')."""
+    return bool(DEICTIC_RE.search(transcript or ""))
 
 
 def is_locate(q: str) -> bool:

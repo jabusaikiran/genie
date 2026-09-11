@@ -66,13 +66,88 @@ _INTERACTIVE_TYPES = {
 }
 
 
+_CONVERSATIONAL_PREFIXES = (
+    "where do i click to ",
+    "where do i click on the ",
+    "where do i click on ",
+    "where do i click the ",
+    "where do i click ",
+    "where can i find the ",
+    "where can i find ",
+    "where should i click on ",
+    "where should i click ",
+    "where is the ",
+    "where's the ",
+    "where is ",
+    "how do i click on the ",
+    "how do i click on ",
+    "how do i click the ",
+    "how do i click ",
+    "how do i find the ",
+    "how do i find ",
+    "how do i open the ",
+    "how do i open ",
+    "how do i access the ",
+    "how do i access ",
+    "how do i use the ",
+    "how do i use ",
+    "how do i get to the ",
+    "how do i get to ",
+    "show me the ",
+    "show me where is the ",
+    "show me where the ",
+    "show me where is ",
+    "show me where ",
+    "show me ",
+    "point at the ",
+    "point at ",
+    "point to the ",
+    "point to ",
+    "find the ",
+    "find ",
+    "locate the ",
+    "locate ",
+    "click the ",
+    "click on the ",
+    "click on ",
+    "click ",
+    "press the ",
+    "press ",
+    "highlight the ",
+    "highlight ",
+)
+
+_FILLER_WORDS = {
+    "button", "icon", "tab", "menu", "item", "option", "link",
+    "field", "this", "that", "here", "please",
+}
+
+
+def _extract_target(query: str) -> str:
+    """Extract candidate target entity from a natural-language conversational query."""
+    q_norm = (query or "").lower().strip().rstrip("?.!")
+    for prefix in _CONVERSATIONAL_PREFIXES:
+        if q_norm.startswith(prefix):
+            q_norm = q_norm[len(prefix):].strip()
+            break
+
+    words = q_norm.split()
+    if words and words[0] in ("the", "a", "an"):
+        words = words[1:]
+    while words and words[-1] in _FILLER_WORDS:
+        words = words[:-1]
+
+    return " ".join(words).strip()
+
+
 def _normalize(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
 
 
-def _score_match(query: str, element_name: str, element_type: str) -> float:
+def _score_match(query: str, element_name: str, element_type: str = "") -> float:
     """Fuzzy match score 0..1. Boosts:
-      - exact substring match in the element name
+      - exact match (raw or extracted entity)
+      - substring match (element name containing extracted entity)
       - interactive control types
       - whole-word match
     """
@@ -80,19 +155,30 @@ def _score_match(query: str, element_name: str, element_type: str) -> float:
     name = _normalize(element_name)
     if not q or not name:
         return 0.0
+
+    target = _normalize(_extract_target(query))
+
     score = 0.0
-    if q == name:
+    if q == name or (target and target == name):
         score = 1.0
+    elif target and (target in name or name in target):
+        ratio = len(target) / max(len(name), len(target), 1)
+        score = max(0.85, 0.7 + 0.25 * ratio)
     elif q in name:
         score = 0.85
     else:
-        # Word overlap
+        # Word overlap - evaluate against extracted target first, then raw query
         q_words = set(q.split())
+        target_words = set(target.split()) if target else set()
         n_words = set(name.split())
-        if q_words and n_words:
+        if target_words and n_words:
+            t_overlap = len(target_words & n_words) / max(len(target_words), 1)
+            score = t_overlap * 0.75
+        elif q_words and n_words:
             overlap = len(q_words & n_words) / max(len(q_words), 1)
             score = overlap * 0.7
-    if element_type in _INTERACTIVE_TYPES:
+
+    if element_type in _INTERACTIVE_TYPES and score > 0.0:
         score = min(1.0, score + 0.1)
     return score
 

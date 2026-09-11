@@ -63,7 +63,7 @@ edge; y=0 is the TOP, y=1000 the BOTTOM. The exact centre of the screen is
 500,500. Sizes/radii use the same scale (100 = 10% of screen width).
 
 POINTING: when you need to point at something, emit EXACTLY ONE tag
-[POINT:x,y:label:screen1] using normalized coordinates and a 1-3 word label,
+[POINT:x,y:label] or [POINT:x,y:label:screen1] using normalized coordinates and a 1-3 word label,
 using any DETECTED ELEMENT coordinate provided above verbatim if given.
 
 DRAWING TAGS (coords normalized 0-1000, trailing :color always optional):
