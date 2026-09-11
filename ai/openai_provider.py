@@ -3,6 +3,10 @@ from typing import AsyncIterator, List
 from openai import AsyncOpenAI
 
 from ai.base_provider import BaseLLMProvider, Message
+from ai.openai_compatible_provider import (
+    build_openai_messages,
+    translate_sdk_error,
+)
 from config import cfg
 
 DEFAULT_MODEL = "gpt-4o"
@@ -31,31 +35,29 @@ class OpenAIProvider(BaseLLMProvider):
         model: str | None = None,
     ) -> AsyncIterator[str]:
         model = model or cfg.openai_default_model or DEFAULT_MODEL
+        supports_vis = self.supports_vision(model)
 
-        messages = [{"role": "system", "content": system_prompt}]
-
-        for msg in history:
-            messages.append({"role": msg.role, "content": msg.content})
-
-        content: list = []
-        for img_b64 in screenshots_b64:
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{img_b64}", "detail": "high"},
-            })
-        content.append({"type": "text", "text": user_text})
-        messages.append({"role": "user", "content": content})
-
-        stream = await self._client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=MAX_TOKENS,
-            stream=True,
+        messages = build_openai_messages(
+            system_prompt=system_prompt,
+            history=history,
+            user_text=user_text,
+            screenshots_b64=screenshots_b64,
+            supports_vision=supports_vis,
         )
-        async for chunk in stream:
-            delta = chunk.choices[0].delta
-            if delta.content:
-                yield delta.content
+
+        try:
+            stream = await self._client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=MAX_TOKENS,
+                stream=True,
+            )
+            async for chunk in stream:
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    yield delta.content
+        except Exception as e:
+            raise translate_sdk_error(self.display_name, e) from e
 
     async def health_check(self) -> bool:
         try:
