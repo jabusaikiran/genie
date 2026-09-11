@@ -282,18 +282,22 @@ def _get_ocr():
 
 
 def _find_via_ocr(query: str, screenshot_path: Optional[str] = None,
-                  pil_image=None, min_score: float = 0.5) -> Optional[Target]:
-    """Run OCR on the primary screen, fuzzy-match the query against detected text."""
+                  pil_image=None, screenshot=None, min_score: float = 0.5) -> Optional[Target]:
+    """Run OCR on the specified screen, fuzzy-match the query against detected text."""
     ocr = _get_ocr()
     if ocr is None:
         return None
 
     try:
         if pil_image is None and screenshot_path is None:
-            # Capture primary screen at full resolution
+            # Capture target monitor (or primary) at full resolution
             import mss
             with mss.mss() as sct:
-                mon = sct.monitors[1]
+                mon_idx = getattr(screenshot, "index", 1) if screenshot else 1
+                if 1 <= mon_idx < len(sct.monitors):
+                    mon = sct.monitors[mon_idx]
+                else:
+                    mon = sct.monitors[1]
                 raw = sct.grab(mon)
                 from PIL import Image
                 pil_image = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
@@ -417,7 +421,7 @@ def find_target(
 
     # Tier 2: OCR — text-based fallback for canvas apps
     if not skip_ocr:
-        t = _find_via_ocr(query, pil_image=pil_image)
+        t = _find_via_ocr(query, pil_image=pil_image, screenshot=screenshot)
         if t is not None and t.confidence >= 0.5:
             return t
 

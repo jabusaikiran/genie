@@ -179,38 +179,42 @@ def _speakable(text: str) -> str:
     return t
 
 
-POINT_RE = re.compile(r'\[POINT:(\d+),(\d+):([^:\]]+?)(?::screen(\d+))?\]')
+POINT_RE = re.compile(
+    r'\[POINT:\s*(\d+)\s*,\s*(\d+)\s*(?::\s*([^:\]]+?)\s*)?(?::\s*(?:screen)?(\d+)\s*)?\]',
+    re.IGNORECASE,
+)
 # A partial "[POINT..." prefix that hasn't closed yet — hold it back from display
 # until the next chunk so we never leak a half tag.
-POINT_PARTIAL_RE = re.compile(r'\[(?:P|PO|POI|POIN|POINT|POINT:[^\]]*)?$')
+POINT_PARTIAL_RE = re.compile(r'\[(?:P|PO|POI|POIN|POINT|POINT:[^\]]*)?$', re.IGNORECASE)
 
 # ── Teaching / drawing tags ──────────────────────────────────────────────────
 # ALL coordinates are normalized 0-1000 relative to the screenshot the model
 # saw (x: 0=left edge, 1000=right edge; y: 0=top, 1000=bottom). The manager
 # converts to logical screen pixels via _denorm(). Trailing :color is optional
 # on every shape. Optional :screenN directs the shape to a specific monitor.
-_C = r'(?::([a-z]+))?'                       # optional trailing color group
+_C = r'(?::([a-zA-Z]+))?'                     # optional trailing color group
 _S = r'(?::screen(\d+))?'                    # optional trailing screen group
-LINE_RE      = re.compile(r'\[LINE:(\d+),(\d+)->(\d+),(\d+)' + _C + _S + r'\]')
-ARROW_RE     = re.compile(r'\[ARROW:(\d+),(\d+)->(\d+),(\d+)' + _C + _S + r'\]')
-CIRCLE_RE    = re.compile(r'\[CIRCLE:(\d+),(\d+),(\d+)(?::([^:\]]*))?' + _C + _S + r'\]')
-RECT_RE      = re.compile(r'\[RECT:(\d+),(\d+),(\d+),(\d+)' + _C + _S + r'\]')
-POLY_RE      = re.compile(r'\[POLY:((?:\d+,\d+[ ]*)+)' + _C + _S + r'\]')
-TEXT_RE      = re.compile(r'\[TEXT:(\d+),(\d+):([^:\]]+)' + _C + r'(?::(s|m|l))?' + _S + r'\]')
-ANGLE_RE     = re.compile(r'\[ANGLE:(\d+),(\d+),(\d+)(?:,(-?\d+))?' + _C + _S + r'\]')
-UNDERLINE_RE = re.compile(r'\[UNDERLINE:(\d+),(\d+),(\d+)' + _C + _S + r'\]')
-LABEL_RE     = re.compile(r'\[LABEL:(\d+),(\d+):([^:\]]+)' + _C + _S + r'\]')
-CLEAR_RE     = re.compile(r'\[CLEAR\]')
+LINE_RE      = re.compile(r'\[LINE:(\d+),(\d+)->(\d+),(\d+)' + _C + _S + r'\]', re.IGNORECASE)
+ARROW_RE     = re.compile(r'\[ARROW:(\d+),(\d+)->(\d+),(\d+)' + _C + _S + r'\]', re.IGNORECASE)
+CIRCLE_RE    = re.compile(r'\[CIRCLE:(\d+),(\d+),(\d+)(?::([^:\]]*))?' + _C + _S + r'\]', re.IGNORECASE)
+RECT_RE      = re.compile(r'\[RECT:(\d+),(\d+),(\d+),(\d+)' + _C + _S + r'\]', re.IGNORECASE)
+POLY_RE      = re.compile(r'\[POLY:((?:\d+,\d+[ ]*)+)' + _C + _S + r'\]', re.IGNORECASE)
+TEXT_RE      = re.compile(r'\[TEXT:(\d+),(\d+):([^:\]]+)' + _C + r'(?::(s|m|l))?' + _S + r'\]', re.IGNORECASE)
+ANGLE_RE     = re.compile(r'\[ANGLE:(\d+),(\d+),(\d+)(?:,(-?\d+))?' + _C + _S + r'\]', re.IGNORECASE)
+UNDERLINE_RE = re.compile(r'\[UNDERLINE:(\d+),(\d+),(\d+)' + _C + _S + r'\]', re.IGNORECASE)
+LABEL_RE     = re.compile(r'\[LABEL:(\d+),(\d+):([^:\]]+)' + _C + _S + r'\]', re.IGNORECASE)
+CLEAR_RE     = re.compile(r'\[CLEAR\]', re.IGNORECASE)
 # Anchor forms — element resolved by name via the hybrid pointer (UIA), so
 # the model never guesses coordinates for real UI: [CIRCLE:@Save button]
-CIRCLE_AT_RE    = re.compile(r'\[CIRCLE:@([^:\]]+?)' + _C + r'\]')
-UNDERLINE_AT_RE = re.compile(r'\[UNDERLINE:@([^:\]]+?)' + _C + r'\]')
+CIRCLE_AT_RE    = re.compile(r'\[CIRCLE:@([^:\]]+?)' + _C + r'\]', re.IGNORECASE)
+UNDERLINE_AT_RE = re.compile(r'\[UNDERLINE:@([^:\]]+?)' + _C + r'\]', re.IGNORECASE)
 
 ANY_TAG_RE   = re.compile(
     r'\[(?:POINT|ARROW|CIRCLE|UNDERLINE|LABEL|LINE|RECT|POLY|TEXT|ANGLE|CLEAR)'
-    r'(?::[^\]]*)?\]'
+    r'(?::[^\]]*)?\]',
+    re.IGNORECASE,
 )
-ANY_PARTIAL_RE = re.compile(r'\[[A-Z]{0,9}(?::[^\]]*)?$')
+ANY_PARTIAL_RE = re.compile(r'\[[a-zA-Z]{0,9}(?::[^\]]*)?$', re.IGNORECASE)
 
 # Questions that ask Clicky to locate / click UI elements — triggers the
 # Computer Use element locator when Claude is the provider.
@@ -795,17 +799,23 @@ class CompanionManager(QObject):
             self._screens_ctx = screenshots
             self.sig_clear_drawings.emit()
 
-            # Active monitor hosting the active window
-            active_scr_idx = find_monitor_for_point(win_info.get("center"), screenshots)
+            # Cursor position context & deictic inspection
+            cursor_pt = cursor_position()
+            cursor_scr_idx = find_monitor_for_point(cursor_pt, screenshots) if cursor_pt else 1
+
+            # Active monitor hosting the active window, falling back to cursor monitor
+            active_scr_idx = None
+            if win_info.get("center"):
+                active_scr_idx = find_monitor_for_point(win_info.get("center"), screenshots)
+            if not active_scr_idx:
+                active_scr_idx = cursor_scr_idx or (screenshots[0].index if screenshots else 1)
+
             self._active_screen_idx = active_scr_idx
             active_shot = self._shot(active_scr_idx) or (screenshots[0] if screenshots else None)
 
-            # Cursor position context & deictic inspection
-            cursor_pt = cursor_position()
-            cursor_scr_idx = find_monitor_for_point(cursor_pt, screenshots)
             c_shot = self._shot(cursor_scr_idx)
             cursor_info_str = None
-            if c_shot:
+            if c_shot and cursor_pt:
                 rel_cx = cursor_pt[0] - c_shot.physical_left
                 rel_cy = cursor_pt[1] - c_shot.physical_top
                 norm_cx = max(0, min(1000, int(round(rel_cx / max(c_shot.physical_width, 1) * 1000))))
@@ -865,14 +875,19 @@ class CompanionManager(QObject):
                     target = None
 
                 if target is not None and target.source in ("uia", "ocr"):
-                    # UIA / OCR coordinates are PHYSICAL pixels; the overlay
-                    # draws in LOGICAL pixels — divide by the DPI scale.
-                    # (Also: return an object with .x/.y — downstream code
-                    # accesses attributes, a bare tuple would crash it.)
+                    # UIA provides physical desktop coordinates:
+                    #   logical = logical_origin + (physical - physical_origin) / dpi_scale
+                    # RapidOCR provides monitor-local image coordinates:
+                    #   logical = logical_origin + local_image_coord / dpi_scale
                     from types import SimpleNamespace
-                    _scale = shot.dpi_scale or 1.0
-                    _pt = SimpleNamespace(x=target.x / _scale,
-                                          y=target.y / _scale)
+                    _scale = (shot.dpi_scale if shot else 1.0) or 1.0
+                    if target.source == "uia":
+                        _lx = shot.logical_left + (target.x - shot.physical_left) / _scale
+                        _ly = shot.logical_top + (target.y - shot.physical_top) / _scale
+                    else:
+                        _lx = shot.logical_left + target.x / _scale
+                        _ly = shot.logical_top + target.y / _scale
+                    _pt = SimpleNamespace(x=_lx, y=_ly, screen_index=shot.index)
                     async def _ready(pt=_pt):
                         return pt
                     locate_task = asyncio.create_task(_ready())
@@ -887,6 +902,8 @@ class CompanionManager(QObject):
                         physical_height=shot.physical_height,
                         physical_left=shot.physical_left,
                         physical_top=shot.physical_top,
+                        logical_left=shot.logical_left,
+                        logical_top=shot.logical_top,
                         dpi_scale=shot.dpi_scale,
                         screen_index=shot.index,
                         user_question=transcript,
@@ -905,6 +922,8 @@ class CompanionManager(QObject):
                             physical_height=shot.physical_height,
                             physical_left=shot.physical_left,
                             physical_top=shot.physical_top,
+                            logical_left=shot.logical_left,
+                            logical_top=shot.logical_top,
                             dpi_scale=shot.dpi_scale,
                             screen_index=shot.index,
                             user_question=transcript,
@@ -1173,12 +1192,6 @@ class CompanionManager(QObject):
     # it saw. The overlay draws in LOGICAL screen pixels. These helpers convert
     # between the two using the ScreenShot metadata captured this turn.
 
-    # ── Coordinate mapping ────────────────────────────────────────────────────
-    #
-    # The LLM emits NORMALIZED 0-1000 coordinates relative to the screenshot
-    # it saw. The overlay draws in LOGICAL screen pixels. These helpers convert
-    # between the two using the ScreenShot metadata captured this turn.
-
     def _shot(self, screen_idx: int | None = None):
         target_idx = screen_idx if screen_idx is not None else getattr(self, "_active_screen_idx", 1)
         for s in self._screens_ctx:
@@ -1193,12 +1206,11 @@ class CompanionManager(QObject):
             return float(nx), float(ny)
         log_w = shot.physical_width / shot.dpi_scale
         log_h = shot.physical_height / shot.dpi_scale
-        # Legacy safety: values beyond 1000 are raw pixels in the downscaled
-        # JPEG the model saw — scale by the JPEG dimensions instead.
-        bx = 1000.0 if (nx <= 1000 and ny <= 1000) else float(max(shot.width, 1))
-        by = 1000.0 if (nx <= 1000 and ny <= 1000) else float(max(shot.height, 1))
-        x = shot.logical_left + (nx / bx) * log_w
-        y = shot.logical_top + (ny / by) * log_h
+        # Safely clamp normalized 0-1000 coordinates to valid range to avoid cliff jumps
+        cx = max(0.0, min(1000.0, float(nx)))
+        cy = max(0.0, min(1000.0, float(ny)))
+        x = shot.logical_left + (cx / 1000.0) * log_w
+        y = shot.logical_top + (cy / 1000.0) * log_h
         return x, y
 
     def _denorm_len(self, n: float, screen_idx: int | None = None) -> float:
@@ -1206,7 +1218,8 @@ class CompanionManager(QObject):
         shot = self._shot(screen_idx)
         if shot is None:
             return float(n)
-        return (n / 1000.0) * (shot.physical_width / shot.dpi_scale)
+        cn = max(0.0, min(1000.0, float(n)))
+        return (cn / 1000.0) * (shot.physical_width / shot.dpi_scale)
 
     def _norm(self, x: float, y: float, screen_idx: int | None = None):
         """Logical screen pixels → normalized 0-1000 (for prompt injection)."""
@@ -1217,7 +1230,7 @@ class CompanionManager(QObject):
         log_h = shot.physical_height / shot.dpi_scale
         nx = (x - shot.logical_left) / max(log_w, 1) * 1000
         ny = (y - shot.logical_top) / max(log_h, 1) * 1000
-        return int(round(nx)), int(round(ny))
+        return max(0, min(1000, int(round(nx)))), max(0, min(1000, int(round(ny))))
 
     def _resolve_anchor(self, name: str):
         """Resolve '@element name' → logical bbox via UIA (fast tier only)."""
@@ -1229,7 +1242,11 @@ class CompanionManager(QObject):
             shot = self._shot(getattr(self, "_active_screen_idx", 1))
             scale = (shot.dpi_scale if shot else 1.0) or 1.0
             l, tp, r, b = t.bbox
-            return (l / scale, tp / scale, r / scale, b / scale)
+            lx1 = shot.logical_left + (l - shot.physical_left) / scale
+            ly1 = shot.logical_top + (tp - shot.physical_top) / scale
+            lx2 = shot.logical_left + (r - shot.physical_left) / scale
+            ly2 = shot.logical_top + (b - shot.physical_top) / scale
+            return (lx1, ly1, lx2, ly2)
         except Exception:
             return None
 
@@ -1238,9 +1255,16 @@ class CompanionManager(QObject):
         tags are deferred and played back in sync with narration."""
         for match in POINT_RE.finditer(text):
             x, y, label, scr = match.groups()
+            label = (label or "").strip()
+            # Support screen-only shorthand like [POINT:500,500:screen2]
+            if label and not scr:
+                sm = re.fullmatch(r'screen(\d+)', label, re.IGNORECASE)
+                if sm:
+                    scr = sm.group(1)
+                    label = ""
             screen_idx = int(scr) if scr else getattr(self, "_active_screen_idx", 1)
             lx, ly = self._denorm(float(x), float(y), screen_idx)
-            self.sig_point_at.emit(lx, ly, label.strip())
+            self.sig_point_at.emit(lx, ly, label)
         if CLEAR_RE.search(text):
             self.sig_clear_drawings.emit()
 
@@ -1292,7 +1316,7 @@ class CompanionManager(QObject):
             l, t, r, b = bbox
             return {"kind": "circle", "x": (l + r) / 2, "y": (t + b) / 2,
                     "r": max(r - l, b - t) / 2 + 10, "label": "",
-                    "color": color or "blue"}
+                    "color": (color or "blue").lower()}
         m = UNDERLINE_AT_RE.fullmatch(tag)
         if m:
             name, color = m.groups()
@@ -1301,16 +1325,16 @@ class CompanionManager(QObject):
                 return None
             l, t, r, b = bbox
             return {"kind": "underline", "x": l, "y": b + 3, "w": r - l,
-                    "color": color or "blue"}
+                    "color": (color or "blue").lower()}
         m = LINE_RE.fullmatch(tag) or ARROW_RE.fullmatch(tag)
         if m:
-            kind = "line" if tag.startswith("[LINE") else "arrow"
+            kind = "line" if tag.lower().startswith("[line") else "arrow"
             x1, y1, x2, y2, color, scr = m.groups()
             screen_idx = int(scr) if scr else getattr(self, "_active_screen_idx", 1)
             n1 = self._snap_pt(float(x1), float(y1))
             n2 = self._snap_pt(float(x2), float(y2))
             return {"kind": kind, "pts": [self._denorm(*n1, screen_idx), self._denorm(*n2, screen_idx)],
-                    "color": color or "blue"}
+                    "color": (color or "blue").lower()}
         m = CIRCLE_RE.fullmatch(tag)
         if m:
             x, y, r, label, color, scr = m.groups()
@@ -1318,7 +1342,7 @@ class CompanionManager(QObject):
             cx, cy = self._denorm(float(x), float(y), screen_idx)
             return {"kind": "circle", "x": cx, "y": cy,
                     "r": max(12.0, self._denorm_len(float(r), screen_idx)),
-                    "label": (label or "").strip(), "color": color or "blue"}
+                    "label": (label or "").strip(), "color": (color or "blue").lower()}
         m = RECT_RE.fullmatch(tag)
         if m:
             x1, y1, x2, y2, color, scr = m.groups()
@@ -1326,7 +1350,7 @@ class CompanionManager(QObject):
             p1 = self._denorm(*self._snap_pt(float(x1), float(y1)), screen_idx)
             p2 = self._denorm(*self._snap_pt(float(x2), float(y2)), screen_idx)
             return {"kind": "rect", "x1": p1[0], "y1": p1[1],
-                    "x2": p2[0], "y2": p2[1], "color": color or "blue"}
+                    "x2": p2[0], "y2": p2[1], "color": (color or "blue").lower()}
         m = POLY_RE.fullmatch(tag)
         if m:
             pts_str, color, scr = m.groups()
@@ -1335,14 +1359,14 @@ class CompanionManager(QObject):
                    for a, b in re.findall(r'(\d+),(\d+)', pts_str)]
             if len(pts) < 3:
                 return None
-            return {"kind": "poly", "pts": pts, "color": color or "blue"}
+            return {"kind": "poly", "pts": pts, "color": (color or "blue").lower()}
         m = TEXT_RE.fullmatch(tag)
         if m:
             x, y, content, color, size, scr = m.groups()
             screen_idx = int(scr) if scr else getattr(self, "_active_screen_idx", 1)
             lx, ly = self._denorm(float(x), float(y), screen_idx)
             return {"kind": "text", "x": lx, "y": ly, "text": content.strip(),
-                    "color": color or "blue", "size": size or "m"}
+                    "color": (color or "blue").lower(), "size": size or "m"}
         m = ANGLE_RE.fullmatch(tag)
         if m:
             x, y, s, rot, color, scr = m.groups()
@@ -1353,7 +1377,7 @@ class CompanionManager(QObject):
             return {"kind": "angle", "x": lx, "y": ly,
                     "s": max(10.0, self._denorm_len(float(s), screen_idx)),
                     "rot": auto_rot if auto_rot is not None else float(rot or 0),
-                    "color": color or "blue"}
+                    "color": (color or "blue").lower()}
         m = UNDERLINE_RE.fullmatch(tag)
         if m:
             x, y, w, color, scr = m.groups()
@@ -1361,14 +1385,14 @@ class CompanionManager(QObject):
             lx, ly = self._denorm(float(x), float(y), screen_idx)
             return {"kind": "underline", "x": lx, "y": ly,
                     "w": max(8.0, self._denorm_len(float(w), screen_idx)),
-                    "color": color or "blue"}
+                    "color": (color or "blue").lower()}
         m = LABEL_RE.fullmatch(tag)
         if m:
             x, y, txt, color, scr = m.groups()
             screen_idx = int(scr) if scr else getattr(self, "_active_screen_idx", 1)
             lx, ly = self._denorm(float(x), float(y), screen_idx)
             return {"kind": "text", "x": lx, "y": ly, "text": txt.strip(),
-                    "color": color or "blue", "size": "s"}
+                    "color": (color or "blue").lower(), "size": "s"}
         return None
 
     def _extract_shapes(self, text: str) -> list:

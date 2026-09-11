@@ -93,6 +93,26 @@ def query_monitor_dpi(phys_left: int = 0, phys_top: int = 0, phys_width: int = 1
     return _query_dpi_scale()
 
 
+def _get_qt_screen_info(index: int) -> tuple[int, int, float] | None:
+    """Query Qt's QScreen geometry and devicePixelRatio when QApplication exists.
+    Returns (logical_left, logical_top, dpi_scale) or None if unavailable."""
+    try:
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app is None:
+            return None
+        screens = app.screens()
+        idx = index - 1
+        if 0 <= idx < len(screens):
+            s = screens[idx]
+            geo = s.geometry()
+            dpr = s.devicePixelRatio()
+            return int(geo.x()), int(geo.y()), float(dpr)
+    except Exception:
+        pass
+    return None
+
+
 def capture_all_screens(max_width: int = 1920, quality: int = 85) -> List[ScreenShot]:
     """Capture all monitors. Each ScreenShot carries everything needed
     to convert detection coords back into logical screen space."""
@@ -120,6 +140,14 @@ def capture_all_screens(max_width: int = 1920, quality: int = 85) -> List[Screen
             img.save(buf, format="JPEG", quality=quality, optimize=True)
             encoded = base64.b64encode(buf.getvalue()).decode("utf-8")
 
+            # Determine logical desktop origin from Qt screen geometry if available
+            qt_info = _get_qt_screen_info(i)
+            if qt_info is not None:
+                log_left, log_top, dpi = qt_info
+            else:
+                log_left = int(round(phys_left / dpi))
+                log_top  = int(round(phys_top  / dpi))
+
             results.append(ScreenShot(
                 index=i,
                 width=img.width,
@@ -130,8 +158,8 @@ def capture_all_screens(max_width: int = 1920, quality: int = 85) -> List[Screen
                 physical_left=phys_left,
                 physical_top=phys_top,
                 dpi_scale=dpi,
-                logical_left=int(round(phys_left / dpi)),
-                logical_top=int(round(phys_top  / dpi)),
+                logical_left=log_left,
+                logical_top=log_top,
             ))
 
     return results

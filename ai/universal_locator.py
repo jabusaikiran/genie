@@ -234,6 +234,8 @@ async def detect_element_universal(
     physical_height: int | None = None,
     physical_left: int = 0,
     physical_top: int = 0,
+    logical_left: int | None = None,
+    logical_top: int | None = None,
     dpi_scale: float = 1.0,
 ) -> Optional[Detected]:
     """Locate the UI element matching `user_question` using ANY vision LLM.
@@ -325,11 +327,10 @@ async def detect_element_universal(
     px = jpeg_x / original_width  * physical_width
     py = jpeg_y / original_height * physical_height
 
-    vx = px + physical_left
-    vy = py + physical_top
-
     s = dpi_scale if dpi_scale > 0 else 1.0
-    lx = int(round(vx / s))
-    ly = int(round(vy / s))
+    log_origin_x = logical_left if logical_left is not None else int(round(physical_left / s))
+    log_origin_y = logical_top if logical_top is not None else int(round(physical_top / s))
+    lx = log_origin_x + int(round(px / s))
+    ly = log_origin_y + int(round(py / s))
 
     return Detected(x=lx, y=ly, screen_index=screen_index)
