@@ -195,34 +195,41 @@ QUIZ_REVIEW_RE = re.compile(
 
 # ── Identity questions ────────────────────────────────────────────────────────
 # OpenAI / Claude refuse to identify people in images even when the answer is
-# trivially in their training data. So when the user asks "who is X" / "tell me
-# about X" / "what does X do" — we strip the screenshot and answer from text +
-# web search. is_identity_question() returns True when:
-#   • the query starts with a who/what-is question word, AND
-#   • the rest looks like a proper noun (a person/thing name, not a generic word)
+# trivially in their training data. So when the user asks "who is X" / "who was X"
+# / "how old is X" — we strip the screenshot and answer from text + web search.
 #
-# False on things like "who is on my screen", "what is this", "who am I" — those
-# legitimately want the screenshot.
+# Crucially, questions about what is on screen ("What is this error?", "What does
+# this button do?", "What is Docker?", "Tell me about this diagram", "Who is on my screen")
+# MUST retain screenshots.
 IDENTITY_RE = re.compile(
     r"^\s*"
     r"(who\s+(is|are|was|were)|"
-    r"tell\s+me\s+about|"
-    r"what\s+(is|does|do)|"
-    r"info\s+(about|on)|"
     r"how\s+old\s+is)"
     r"\s+"
-    # require what follows to NOT be a screen-referring phrase
+    # Negative lookahead: reject screen references
     r"(?!"
     r"this|that|it|my\s+screen|on\s+(my\s+)?screen|going\s+on|"
-    r"happening|the\s+screen|here|i\s|i\b)"
+    r"happening|the\s+screen|here|in\s+this|in\s+that|i\s|i\b)"
     r".+",
+    re.IGNORECASE,
+)
+
+SCREEN_CONTEXT_TOKENS_RE = re.compile(
+    r"\b(screen|this|that|error|button|icon|code|image|picture|diagram|"
+    r"chart|window|dialog|line|symbol|syntax|menu|cursor|here)\b",
     re.IGNORECASE,
 )
 
 
 def is_identity_question(q: str) -> bool:
-    """Detects 'who is <person>'-style queries that should NOT include a screenshot."""
-    return bool(q) and IDENTITY_RE.match(q.strip()) is not None
+    """Detects 'who is <person>'-style queries that should NOT include a screenshot.
+    Returns False whenever visual/screen context is indicated."""
+    if not q:
+        return False
+    stripped = q.strip()
+    if SCREEN_CONTEXT_TOKENS_RE.search(stripped):
+        return False
+    return IDENTITY_RE.match(stripped) is not None
 
 
 def is_repeat(q: str) -> bool:
@@ -252,3 +259,102 @@ _PRIVACY_RE = re.compile(PRIVACY_BLOCKLIST, re.IGNORECASE)
 
 def is_sensitive_window(title: str) -> bool:
     return bool(title) and _PRIVACY_RE.search(title) is not None
+
+
+def find_sensitive_windows() -> list[dict]:
+    """Enumerate visible top-level windows and return list of sensitive window dicts:
+    [{'hwnd': hwnd, 'title': title, 'rect': (left, top, right, bottom)}, ...]
+    """
+    sensitive = []
+    try:
+        u = ctypes.windll.user32
+        WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG),
+            ]
+
+        def _enum_proc(hwnd, lparam):
+            try:
+                if not u.IsWindowVisible(hwnd):
+                    return True
+                if u.IsIconic(hwnd):
+                    return True  # Minimized windows do not appear in desktop screenshots
+                n = u.GetWindowTextLengthW(hwnd)
+                if n <= 0:
+                    return True
+                buf = ctypes.create_unicode_buffer(n + 1)
+                u.GetWindowTextW(hwnd, buf, n + 1)
+                title = buf.value or ""
+                if is_sensitive_window(title):
+                    rect = RECT()
+                    if u.GetWindowRect(hwnd, ctypes.byref(rect)):
+                        l, t, r, b = int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)
+                        sensitive.append({"hwnd": hwnd, "title": title, "rect": (l, t, r, b)})
+                    else:
+                        sensitive.append({"hwnd": hwnd, "title": title, "rect": None})
+            except Exception:
+                pass
+            return True
+
+        cb = WNDENUMPROC(_enum_proc)
+        u.EnumWindows(cb, 0)
+    except Exception:
+        pass
+    return sensitive
+
+
+def get_sensitive_monitor_indices(screens: list) -> set[int]:
+    """Return the set of monitor indices (1-based) containing sensitive windows.
+    Fails closed (returns all monitor indices) if the active window is sensitive
+    or if any sensitive window's monitor attribution is uncertain."""
+    if not screens:
+        return set()
+
+    all_indices = {s.index for s in screens}
+
+    # 1. Fail-safe: if the active window itself is sensitive, fail closed for all monitors
+    active_title = active_window_title()
+    if is_sensitive_window(active_title):
+        return all_indices
+
+    # 2. Enumerate all visible windows on the desktop
+    sensitive_wins = find_sensitive_windows()
+    if not sensitive_wins:
+        return set()
+
+    sensitive_monitors = set()
+    for win in sensitive_wins:
+        rect = win.get("rect")
+        if not rect or len(rect) != 4:
+            # Uncertain rect -> fail closed immediately
+            return all_indices
+
+        wl, wt, wr, wb = rect
+        if wr <= wl or wb <= wt:
+            # Invalid dimensions -> fail closed
+            return all_indices
+
+        hit_monitors = set()
+        for s in screens:
+            mon_l = getattr(s, "physical_left", 0)
+            mon_t = getattr(s, "physical_top", 0)
+            mon_r = mon_l + getattr(s, "physical_width", 0)
+            mon_b = mon_t + getattr(s, "physical_height", 0)
+
+            # Check physical bounding box overlap
+            if min(wr, mon_r) > max(wl, mon_l) and min(wb, mon_b) > max(wt, mon_t):
+                hit_monitors.add(s.index)
+
+        if not hit_monitors:
+            # Window is visible according to OS, but doesn't intersect any known monitor bounds
+            # Uncertain attribution -> fail closed
+            return all_indices
+
+        sensitive_monitors.update(hit_monitors)
+
+    return sensitive_monitors

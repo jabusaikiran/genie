@@ -28,7 +28,7 @@ from tutor import (
     cursor_position, find_monitor_for_point, get_element_at_point, is_deictic,
     is_locate, is_multistep, is_next, is_stop, is_sensitive_window,
     is_repeat, is_journal_today, is_journal_week, is_quiz_review,
-    is_identity_question,
+    is_identity_question, get_sensitive_monitor_indices,
 )
 from tutor_features import (
     journal, pdf_context, ocr, code_mode, lesson_recorder,
@@ -340,7 +340,8 @@ class CompanionManager(QObject):
         self._tts = None
 
         # Current in-flight generation — tracked so Esc / stop can cancel
-        self._current_task: Optional[asyncio.Future] = None
+        self._current_task: Optional[asyncio.Task] = None
+        self._active_request_id: int = 0
         self._cancel_flag = False
 
         # Push-to-talk bookkeeping. A capture can be ended either by releasing
@@ -620,6 +621,7 @@ class CompanionManager(QObject):
     # ── Capture flow ──────────────────────────────────────────────────────────
 
     def _begin_capture(self):
+        self._cancel_flag = False
         self._end_claimed = False
         self._last_rms = 0.0
         # Silence anything still playing from the previous turn. Without this
@@ -661,7 +663,7 @@ class CompanionManager(QObject):
         speech_started = False
         silence_from: Optional[float] = None
 
-        while self._state == AppState.LISTENING:
+        while self._state == AppState.LISTENING and not self._cancel_flag:
             await asyncio.sleep(0.05)
             now = time.monotonic()
 
@@ -679,20 +681,34 @@ class CompanionManager(QObject):
             if now - start_t > self._MAX_UTTERANCE_S:
                 break
 
+        # If cancelled or state was already reset, abort immediately without processing
+        if self._cancel_flag or self._state != AppState.LISTENING:
+            return
+
         if self._claim_end():
             await self._end_capture_and_process()
 
     async def _end_capture_and_process(self):
+        this_task = asyncio.current_task()
+        self._current_task = this_task
+        self._active_request_id += 1
+        req_id = self._active_request_id
+
         try:
             pcm = self._listener.stop_recording()
         except Exception as e:
             _log.exception("mic stop failed")
-            self.sig_error.emit(f"Microphone capture failed: {e}")
-            self._emit_state(AppState.IDLE)
+            if req_id == self._active_request_id and not self._cancel_flag:
+                self.sig_error.emit(f"Microphone capture failed: {e}")
+                self._emit_state(AppState.IDLE)
             return
         _log.info("captured %.1fs of audio", len(pcm) / 32000)
         if len(pcm) < 3200:  # < 0.1s of audio — ignore
-            self._emit_state(AppState.IDLE)
+            if req_id == self._active_request_id:
+                self._emit_state(AppState.IDLE)
+            return
+
+        if self._cancel_flag or req_id != self._active_request_id:
             return
 
         # 32000 bytes == 1s of 16 kHz mono int16.
@@ -709,8 +725,13 @@ class CompanionManager(QObject):
             )
             _log.info("transcript: %r (provider=%s)",
                       transcript[:120], cfg.llm_provider())
+
+            if self._cancel_flag or req_id != self._active_request_id:
+                return
+
             if not transcript.strip():
-                self._emit_state(AppState.IDLE)
+                if req_id == self._active_request_id:
+                    self._emit_state(AppState.IDLE)
                 return
 
             # ── Voice commands — short-circuit before LLM ──
@@ -722,11 +743,6 @@ class CompanionManager(QObject):
             title = win_info.get("title", "")
             ak = app_key(title)
 
-            # Voice commands are one or two words, so they cannot come from a
-            # long recording. Whisper degrades to a short generic phrase
-            # ("Continue.", "Repeat.") on unclear or code-mixed speech, and
-            # without this length check a mis-transcribed sentence silently
-            # replayed the previous answer instead of being asked.
             command_plausible = audio_seconds <= self._MAX_COMMAND_SECONDS
             if not command_plausible and (is_next(transcript) or is_repeat(transcript)):
                 _log.info(
@@ -741,6 +757,8 @@ class CompanionManager(QObject):
 
             # "say it again" — replay the last response without a new LLM call
             if command_plausible and is_repeat(transcript) and self._last_response:
+                if self._cancel_flag or req_id != self._active_request_id:
+                    return
                 self.sig_response_chunk.emit(self._last_response)
                 self.sig_response_done.emit(self._last_response)
                 self._emit_state(AppState.SPEAKING)
@@ -748,22 +766,26 @@ class CompanionManager(QObject):
                     await self._get_tts().speak(self._last_response)
                 except Exception:
                     pass
-                self._emit_state(AppState.IDLE)
+                if req_id == self._active_request_id and not self._cancel_flag:
+                    self._emit_state(AppState.IDLE)
                 return
 
             # Journal voice queries — answered locally, no LLM call needed
             if is_journal_today(transcript):
                 msg = journal.summarise(journal.entries_today(),
                                         "Here's what you asked about today:\n")
-                await self._reply_local(msg)
+                if not self._cancel_flag and req_id == self._active_request_id:
+                    await self._reply_local(msg)
                 return
             if is_journal_week(transcript):
                 msg = journal.summarise(journal.entries_this_week(),
                                         "Here's the past week:\n")
-                await self._reply_local(msg)
+                if not self._cancel_flag and req_id == self._active_request_id:
+                    await self._reply_local(msg)
                 return
             if is_quiz_review(transcript):
-                await self._spaced_review()
+                if not self._cancel_flag and req_id == self._active_request_id:
+                    await self._spaced_review()
                 return
 
             # User-created skills (run BEFORE the LLM, like built-ins above)
@@ -771,29 +793,68 @@ class CompanionManager(QObject):
                 skill = skills_pkg.match(transcript)
                 if skill:
                     msg = await skill["handler"](self, transcript)
-                    if msg:
+                    if msg and not self._cancel_flag and req_id == self._active_request_id:
                         await self._reply_local(msg)
                     return
             except Exception as e:
-                self.sig_error.emit(f"Skill error: {e}")
+                if not self._cancel_flag and req_id == self._active_request_id:
+                    self.sig_error.emit(f"Skill error: {e}")
 
-            # 2. Screen capture — skipped if sensitive window (password manager etc.)
-            #
-            # ALSO skipped for "who is X" / "tell me about X" identity questions:
-            # OpenAI + Claude refuse to identify people in screenshots even when
-            # the answer is in their training data ("Sorry I can't identify the
-            # person in images"). Stripping the screenshot lets the LLM answer
-            # from training data + web search instead, which is what the user
-            # actually wants when they ask "who is MrBeast" while on YouTube.
-            sensitive = self._privacy_guard and is_sensitive_window(title)
+            # 2. Screen capture & Multi-Monitor Privacy Filtering
+            sensitive_active = self._privacy_guard and is_sensitive_window(title)
             identity_q = is_identity_question(transcript)
-            if sensitive or identity_q:
+            sensitive_monitors = set()
+            privacy_explanation = ""
+
+            if sensitive_active or identity_q:
                 screenshots = []
                 images_b64 = []
+                if sensitive_active:
+                    privacy_explanation = (
+                        "\n\nPRIVACY GUARD: the user's active window looks sensitive "
+                        "(password manager, banking, login). I did NOT take a "
+                        "screenshot. Answer from memory only, and tell the user you "
+                        "skipped the screenshot for safety.\n"
+                    )
             else:
-                screenshots = await asyncio.to_thread(capture_all_screens)
-                llm = self._get_llm()
-                images_b64 = [s.base64_jpeg for s in screenshots] if llm.supports_vision(self._current_model) else []
+                captured = await asyncio.to_thread(capture_all_screens)
+                if self._cancel_flag or req_id != self._active_request_id:
+                    return
+
+                if self._privacy_guard:
+                    sensitive_monitors = get_sensitive_monitor_indices(captured)
+                    all_indices = {s.index for s in captured}
+                    if sensitive_monitors == all_indices:
+                        # Fail-closed / all screens affected -> transmit no screenshots
+                        screenshots = []
+                        images_b64 = []
+                        privacy_explanation = (
+                            "\n\nPRIVACY GUARD: A sensitive window is visible on your screen "
+                            "(password manager, credentials, banking). Screenshots were omitted "
+                            "for safety. Answer from memory only, and tell the user you "
+                            "skipped the screenshot for safety.\n"
+                        )
+                    elif sensitive_monitors:
+                        # Partial suppression: filter out sensitive monitors BEFORE payload construction
+                        screenshots = [s for s in captured if s.index not in sensitive_monitors]
+                        llm = self._get_llm()
+                        images_b64 = [s.base64_jpeg for s in screenshots] if llm.supports_vision(self._current_model) else []
+                        privacy_explanation = (
+                            f"\n\nPRIVACY GUARD: Screen(s) {sorted(sensitive_monitors)} contain sensitive windows. "
+                            f"Those screenshot(s) were omitted for privacy.\n"
+                        )
+                    else:
+                        screenshots = captured
+                        llm = self._get_llm()
+                        images_b64 = [s.base64_jpeg for s in screenshots] if llm.supports_vision(self._current_model) else []
+                else:
+                    screenshots = captured
+                    llm = self._get_llm()
+                    images_b64 = [s.base64_jpeg for s in screenshots] if llm.supports_vision(self._current_model) else []
+
+            if self._cancel_flag or req_id != self._active_request_id:
+                return
+
             # Fresh question → wipe the previous lesson's drawings and remember
             # this turn's screenshots for coordinate mapping.
             self._screens_ctx = screenshots
@@ -842,13 +903,6 @@ class CompanionManager(QObject):
                     self._figures_ctx = []
 
             # 3. Parallel side-work: web search + element locator
-            #
-            # Pointing now works for EVERY provider:
-            #   • If ANTHROPIC_API_KEY is set → use Claude Computer Use
-            #     (~5px accuracy, gold standard).
-            #   • Otherwise → universal grid-based locator with the active
-            #     vision LLM (Copilot GPT-4o, OpenAI, Gemini, Ollama llava).
-            #     ~25-50px accuracy. Good enough for buttons/menus/icons.
             locate_triggered = is_locate(transcript)
             multistep = is_multistep(transcript)
 
@@ -860,13 +914,10 @@ class CompanionManager(QObject):
 
             if active_shot and locate_triggered:
                 shot = active_shot
-                # Pointing accuracy upgrade: try the hybrid pointer first.
-                # Tier 1 (UIA tree) is ~5ms and pixel-perfect; tier 2 (OCR)
-                # handles canvas apps. Falls through to the vision LLM grid
-                # below only when both whiff.
                 try:
                     from ai.hybrid_pointer import find_target as _hybrid_find
-                    target = _hybrid_find(
+                    target = await asyncio.to_thread(
+                        _hybrid_find,
                         transcript,
                         screenshot=shot,
                         llm_provider=self._get_llm(),
@@ -875,10 +926,6 @@ class CompanionManager(QObject):
                     target = None
 
                 if target is not None and target.source in ("uia", "ocr"):
-                    # UIA provides physical desktop coordinates:
-                    #   logical = logical_origin + (physical - physical_origin) / dpi_scale
-                    # RapidOCR provides monitor-local image coordinates:
-                    #   logical = logical_origin + local_image_coord / dpi_scale
                     from types import SimpleNamespace
                     _scale = (shot.dpi_scale if shot else 1.0) or 1.0
                     if target.source == "uia":
@@ -892,7 +939,7 @@ class CompanionManager(QObject):
                         return pt
                     locate_task = asyncio.create_task(_ready())
                 elif cfg.anthropic_api_key:
-                    # Path A — Anthropic Computer Use (best accuracy)
+                    # Path A — Anthropic Computer Use
                     from ai.element_locator import detect_element
                     locate_task = asyncio.create_task(detect_element(
                         screenshot_jpeg_b64=shot.base64_jpeg,
@@ -909,7 +956,7 @@ class CompanionManager(QObject):
                         user_question=transcript,
                     ))
                 else:
-                    # Path B — Universal grid locator (any vision LLM)
+                    # Path B — Universal grid locator
                     try:
                         from ai.universal_locator import detect_element_universal
                         llm = self._get_llm()
@@ -930,7 +977,6 @@ class CompanionManager(QObject):
                             model=self._current_model,
                         ))
                     except Exception:
-                        # Universal locator should never crash the main flow
                         locate_task = None
 
             search_results = ""
@@ -947,16 +993,11 @@ class CompanionManager(QObject):
                     detected = await locate_task
                 except Exception:
                     detected = None
-            if detected:
-                # Short label guess — first noun phrase after "the"/"where"
+            if detected and not self._cancel_flag and req_id == self._active_request_id:
                 label = _guess_label(transcript)
                 detected_screen = getattr(detected, "screen_index", active_scr_idx)
-                # Prompt wants NORMALIZED 0-1000 coords (the model echoes them
-                # into [POINT:...] which _parse_points denormalizes back).
                 ndx, ndy = self._norm(detected.x, detected.y, detected_screen)
                 detected_coord = (ndx, ndy, label, detected_screen)
-                # Fire the overlay NOW so the buddy flies over while the LLM
-                # still thinks. Hold dwell until TTS completes.
                 self.sig_point_hold.emit(True)
                 pointing_held = True
                 self.sig_point_at.emit(
@@ -966,18 +1007,17 @@ class CompanionManager(QObject):
             # ── Per-turn enrichment: code mode, language, OCR, attached docs ──
             code_active = self._code_mode_auto and code_mode.is_code_window(title)
             if cfg.response_language:
-                lang_code = cfg.response_language   # user-forced — always wins
+                lang_code = cfg.response_language
             else:
                 lang_code = (multilang.detect_language(transcript)
                              if self._multilang else "en")
 
-            # OCR fallback for fine print (only if user actually asks to read)
             ocr_extra = ""
             if self._ocr_enabled and active_shot and ocr.needs_ocr(transcript):
                 try:
                     import base64
                     jpeg = base64.b64decode(active_shot.base64_jpeg)
-                    txt = ocr.run_ocr(jpeg)
+                    txt = await asyncio.to_thread(ocr.run_ocr, jpeg)
                     if txt:
                         ocr_extra = ocr.format_for_prompt(txt)
                 except Exception:
@@ -998,21 +1038,14 @@ class CompanionManager(QObject):
                 language_code=lang_code,
                 extra=base_extra,
             )
-            if sensitive:
-                system_base += (
-                    "\n\nPRIVACY GUARD: the user's active window looks sensitive "
-                    "(password manager, banking, login). I did NOT take a "
-                    "screenshot. Answer from memory only, and tell the user you "
-                    "skipped the screenshot for safety.\n"
-                )
+            if privacy_explanation:
+                system_base += privacy_explanation
             if search_results:
                 from ai.web_search import build_search_context
                 system_base += build_search_context(search_results)
 
-            # Use per-app history so context doesn't bleed between apps
             history = self._app_memory.setdefault(ak, [])
 
-            # Apply safe context-window budgeting
             llm = self._get_llm()
             model_info = llm.get_capabilities(self._current_model)
             doc_extra, budgeted_history = _budget_context(
@@ -1025,10 +1058,12 @@ class CompanionManager(QObject):
             )
             system = system_base + doc_extra
 
+            if self._cancel_flag or req_id != self._active_request_id:
+                return
+
             # 5. Stream LLM — buffer partial [POINT:...] tags so they never leak
             full_response = ""
             display_buf = ""
-            self._cancel_flag = False
             async for chunk in llm.stream_response(
                 user_text=transcript,
                 screenshots_b64=images_b64,
@@ -1036,11 +1071,11 @@ class CompanionManager(QObject):
                 system_prompt=system,
                 model=self._current_model,
             ):
-                if self._cancel_flag:
+                if self._cancel_flag or req_id != self._active_request_id:
                     break
                 full_response += chunk
                 display_buf += chunk
-                self._parse_points(display_buf)
+                self._parse_points(display_buf, req_id=req_id)
                 display_buf = ANY_TAG_RE.sub("", display_buf)
                 m = ANY_PARTIAL_RE.search(display_buf)
                 if m:
@@ -1049,59 +1084,66 @@ class CompanionManager(QObject):
                 else:
                     flush = display_buf
                     display_buf = ""
-                if flush:
+                if flush and not self._cancel_flag and req_id == self._active_request_id:
                     self.sig_response_chunk.emit(flush)
-            if display_buf:
+
+            if display_buf and not self._cancel_flag and req_id == self._active_request_id:
                 self.sig_response_chunk.emit(ANY_TAG_RE.sub("", display_buf))
 
-            # 6. Update per-app history with sanitized response (strip control/drawing tags)
-            history.append(Message(role="user", content=transcript))
-            sanitized_response = _sanitize_history_text(full_response)
-            history.append(Message(role="assistant", content=sanitized_response))
-            self._app_memory[ak] = history[-20:]
-
-            # Multistep: parse numbered steps for later "next" invocations
-            if multistep and not self._lesson_steps:
-                steps = _split_steps(full_response)
-                if len(steps) > 1:
-                    self._lesson_steps = steps
-                    self._lesson_step_idx = 0
-
-            clean = ANY_TAG_RE.sub("", full_response).strip()
-            self.sig_response_done.emit(clean)
-            self._last_response = clean   # for "say it again"
-
-            # Log to knowledge journal (skipped in quiz mode — those Q&As aren't
-            # study material)
-            if self._journal_enabled and not self._quiz_mode:
-                try:
-                    journal.log_qa(
-                        question=transcript, answer=clean,
-                        app_key=ak, window_title=title,
-                        provider=cfg.llm_provider(),
-                        model=self._current_model or "",
-                    )
-                except Exception:
-                    pass
-
-            # Lesson recorder gets the Q&A in transcript.md
-            if self._recorder and self._recorder.is_recording:
-                self._recorder.log_question(transcript)
-                self._recorder.log_answer(clean)
-
-            # Live-collab broadcast
-            if self._collab and self._collab.code:
-                try:
-                    await self._collab.send({
-                        "type": "qa", "q": transcript, "a": clean,
-                    })
-                except Exception:
-                    pass
-
-            # 7. TTS — hold the point visible while we speak. Switch voice
-            # to match the user's language for multilingual mode.
-            if self._cancel_flag:
+            if self._cancel_flag or req_id != self._active_request_id:
                 return
+
+            # 6. Update per-app history with sanitized response
+            if not self._cancel_flag and req_id == self._active_request_id:
+                history.append(Message(role="user", content=transcript))
+                sanitized_response = _sanitize_history_text(full_response)
+                history.append(Message(role="assistant", content=sanitized_response))
+                self._app_memory[ak] = history[-20:]
+
+                # Multistep: parse numbered steps for later "next" invocations
+                if multistep and not self._lesson_steps:
+                    steps = _split_steps(full_response)
+                    if len(steps) > 1:
+                        self._lesson_steps = steps
+                        self._lesson_step_idx = 0
+
+                clean = ANY_TAG_RE.sub("", full_response).strip()
+                self.sig_response_done.emit(clean)
+                self._last_response = clean   # for "say it again"
+
+                # Log to knowledge journal
+                if self._journal_enabled and not self._quiz_mode:
+                    try:
+                        await asyncio.to_thread(
+                            journal.log_qa,
+                            question=transcript, answer=clean,
+                            app_key=ak, window_title=title,
+                            provider=cfg.llm_provider(),
+                            model=self._current_model or "",
+                        )
+                    except Exception:
+                        pass
+
+                # Lesson recorder gets the Q&A in transcript.md
+                if self._recorder and self._recorder.is_recording:
+                    self._recorder.log_question(transcript)
+                    self._recorder.log_answer(clean)
+
+                # Live-collab broadcast
+                if self._collab and self._collab.code:
+                    try:
+                        await self._collab.send({
+                            "type": "qa", "q": transcript, "a": clean,
+                        })
+                    except Exception:
+                        pass
+            else:
+                clean = ANY_TAG_RE.sub("", full_response).strip()
+
+            if self._cancel_flag or req_id != self._active_request_id:
+                return
+
+            # 7. TTS
             if self._multilang:
                 try:
                     stable = self._stable_voice_language(lang_code)
@@ -1113,25 +1155,28 @@ class CompanionManager(QObject):
                             _log.info("reply voice switched to %r", stable)
                 except Exception:
                     pass
-            self._emit_state(AppState.SPEAKING)
+
+            if req_id == self._active_request_id and not self._cancel_flag:
+                self._emit_state(AppState.SPEAKING)
             try:
-                await self._play_lesson(full_response, clean)
+                await self._play_lesson(full_response, clean, req_id=req_id)
             except asyncio.CancelledError:
                 pass
 
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
-            # Log the traceback, not just the message. The toast shows one
-            # line, so discarding the stack here left bug reporters with
-            # nothing to go on — issue #15 was reported as a bare
-            # "'NoneType' object has no attribute 'write'" with no way to
-            # tell which call produced it.
-            _log.exception("request failed: %s", e)
-            self.sig_error.emit(str(e))
+            if not self._cancel_flag and req_id == self._active_request_id:
+                _log.exception("request failed: %s", e)
+                self.sig_error.emit(str(e))
 
         finally:
-            if pointing_held:
+            if pointing_held and (req_id == self._active_request_id):
                 self.sig_point_release.emit()
-            self._emit_state(AppState.IDLE)
+            if self._current_task is this_task:
+                self._current_task = None
+            if req_id == self._active_request_id:
+                self._emit_state(AppState.IDLE)
 
     async def _reply_local(self, msg: str):
         """Show + speak a message that doesn't need an LLM round-trip."""
@@ -1250,10 +1295,14 @@ class CompanionManager(QObject):
         except Exception:
             return None
 
-    def _parse_points(self, text: str):
+    def _parse_points(self, text: str, req_id: Optional[int] = None):
         """Live-during-stream tags: pointing and board-clear only. Drawing
         tags are deferred and played back in sync with narration."""
+        if req_id is not None and (self._cancel_flag or req_id != self._active_request_id):
+            return
         for match in POINT_RE.finditer(text):
+            if req_id is not None and (self._cancel_flag or req_id != self._active_request_id):
+                return
             x, y, label, scr = match.groups()
             label = (label or "").strip()
             # Support screen-only shorthand like [POINT:500,500:screen2]
@@ -1266,6 +1315,8 @@ class CompanionManager(QObject):
             lx, ly = self._denorm(float(x), float(y), screen_idx)
             self.sig_point_at.emit(lx, ly, label)
         if CLEAR_RE.search(text):
+            if req_id is not None and (self._cancel_flag or req_id != self._active_request_id):
+                return
             self.sig_clear_drawings.emit()
 
     # ── Vertex snapping (figure-detector assisted accuracy) ─────────────────
@@ -1429,12 +1480,16 @@ class CompanionManager(QObject):
                 out.append((clean, shapes))
         return out
 
-    async def _play_lesson(self, full_response: str, clean: str):
+    async def _play_lesson(self, full_response: str, clean: str, req_id: Optional[int] = None):
         """Narrate sentence by sentence, drawing each sentence's shapes as it
         is spoken — the cadence of a teacher at a whiteboard. Falls back to
         plain TTS when the response contains no drawings."""
+        if req_id is not None and (self._cancel_flag or req_id != self._active_request_id):
+            return
         segments = self._segment_lesson(full_response)
         if not any(shapes for _, shapes in segments):
+            if req_id is not None and (self._cancel_flag or req_id != self._active_request_id):
+                return
             await self._get_tts().speak(_speakable(clean))
             return
 
@@ -1448,10 +1503,12 @@ class CompanionManager(QObject):
 
         draw_end = time.monotonic()
         for text, shapes in segments:
-            if self._cancel_flag:
+            if self._cancel_flag or (req_id is not None and req_id != self._active_request_id):
                 break
             draw_end = max(draw_end, time.monotonic())
             for sh in shapes:
+                if self._cancel_flag or (req_id is not None and req_id != self._active_request_id):
+                    break
                 self.sig_draw.emit(sh)
                 if _shape_length is not None:
                     dur = _shape_length(sh) / STROKE_SPEED_PX_S
@@ -1459,6 +1516,8 @@ class CompanionManager(QObject):
                     draw_end += dur + SHAPE_GAP_SECONDS
                 else:
                     draw_end += 1.0
+            if self._cancel_flag or (req_id is not None and req_id != self._active_request_id):
+                break
             if text:
                 try:
                     await self._get_tts().speak(_speakable(text))
@@ -1466,6 +1525,8 @@ class CompanionManager(QObject):
                     raise
                 except Exception:
                     pass
+            if self._cancel_flag or (req_id is not None and req_id != self._active_request_id):
+                break
             # A real teacher finishes the stroke before the next sentence —
             # wait out any drawing time the narration didn't cover.
             remaining = draw_end - time.monotonic()
@@ -1831,22 +1892,46 @@ class CompanionManager(QObject):
 
     def stop(self):
         """Cancel the current LLM stream + any in-flight TTS. Bound to Esc."""
+        if self._state == AppState.IDLE and not self._cancel_flag and self._current_task is None:
+            return
+
         self._cancel_flag = True
-        # Kill audio playback immediately — flips the global stop event so
+
+        # 1. Abort mic capture if listening
+        if self._state == AppState.LISTENING:
+            try:
+                self._listener.stop_recording()
+            except Exception:
+                pass
+
+        # 2. Cancel in-flight asyncio task
+        if self._current_task and not self._current_task.done():
+            task = self._current_task
+            if self._loop and self._loop.is_running():
+                self._loop.call_soon_threadsafe(task.cancel)
+            else:
+                task.cancel()
+
+        # 3. Kill audio playback immediately — flips the global stop event so
         # the chunked PortAudio loop bails out within ~50 ms.
         try:
             from audio.playback import stop_audio
             stop_audio()
         except Exception:
             pass
-        # Some TTS providers also have their own cancel hook
+
+        # 4. Some TTS providers also have their own cancel hook
         tts = self._tts
         if tts and hasattr(tts, "stop"):
             try:
                 tts.stop()
             except Exception:
                 pass
-        # Clear any stored lesson so "stop" really means "back to zero"
+
+        # 5. Release any active pointer overlay
+        self.sig_point_release.emit()
+
+        # 6. Clear any stored lesson so "stop" really means "back to zero"
         self._lesson_steps = []
         self._lesson_step_idx = 0
         self._emit_state(AppState.IDLE)

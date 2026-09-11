@@ -188,6 +188,8 @@ def main():
 
     # Panel → Manager
     panel.on_model_changed.connect(manager.set_model)
+    panel.on_push_to_talk_pressed.connect(manager.on_hotkey_press)
+    panel.on_push_to_talk_released.connect(manager.on_hotkey_release)
 
     def _on_doc_dropped(path: str):
         ok = manager.attach_document(path)

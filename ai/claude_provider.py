@@ -95,8 +95,21 @@ class ClaudeProvider(BaseLLMProvider):
     provider_id = "claude"
     display_name = "Anthropic Claude"
 
-    def __init__(self):
-        self._client = anthropic.AsyncAnthropic(api_key=cfg.anthropic_api_key)
+    def __init__(self, api_key: str | None = None):
+        self._api_key = api_key
+        self._client: anthropic.AsyncAnthropic | None = None
+
+    def _get_client(self) -> anthropic.AsyncAnthropic:
+        if self._client is None:
+            key = self._api_key or cfg.anthropic_api_key
+            if not key:
+                raise AuthenticationError(
+                    "[Anthropic Claude] API key is not configured. Set ANTHROPIC_API_KEY in your environment or Tray -> Settings -> API Keys.",
+                    provider="claude",
+                    status_code=401,
+                )
+            self._client = anthropic.AsyncAnthropic(api_key=key)
+        return self._client
 
     async def stream_response(
         self,
@@ -106,6 +119,7 @@ class ClaudeProvider(BaseLLMProvider):
         system_prompt: str,
         model: str | None = None,
     ) -> AsyncIterator[str]:
+        client = self._get_client()
         model = model or DEFAULT_MODEL
         supports_vis = self.supports_vision(model)
 
@@ -137,7 +151,7 @@ class ClaudeProvider(BaseLLMProvider):
         messages.append({"role": "user", "content": content})
 
         try:
-            async with self._client.messages.stream(
+            async with client.messages.stream(
                 model=model,
                 max_tokens=MAX_TOKENS,
                 system=system_prompt,
@@ -152,7 +166,8 @@ class ClaudeProvider(BaseLLMProvider):
 
     async def health_check(self) -> bool:
         try:
-            await self._client.models.list()
+            client = self._get_client()
+            await client.models.list()
             return True
         except Exception:
             return False

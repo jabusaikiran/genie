@@ -259,6 +259,8 @@ class CompanionPanel(QWidget):
         self._ptt_btn.setObjectName("hotkey_btn")
         self._ptt_btn.setFont(FONT_LABEL)
         self._ptt_btn.setFixedHeight(44)
+        self._ptt_btn.pressed.connect(self.on_push_to_talk_pressed.emit)
+        self._ptt_btn.released.connect(self.on_push_to_talk_released.emit)
         root.addWidget(self._ptt_btn)
 
         # Footer: model selector + provider info
@@ -348,6 +350,8 @@ class CompanionPanel(QWidget):
 
     def set_state(self, state: AppState):
         self._state = state
+        if state in (AppState.LISTENING, AppState.THINKING):
+            self.clear_response()
         color = STATE_COLORS[state]
         self._status_dot.setStyleSheet(
             f"color: rgb({color.red()},{color.green()},{color.blue()}); font-size: 10px;"
