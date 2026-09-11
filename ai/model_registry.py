@@ -275,10 +275,42 @@ async def _fetch_gemini() -> list[dict]:
     return out
 
 
+async def _fetch_lmstudio() -> list[dict]:
+    try:
+        from ai.lmstudio_provider import LMStudioProvider
+        provider = LMStudioProvider()
+        mids = await provider.list_models()
+    except Exception:
+        return []
+
+    if not mids:
+        return []
+
+    from ai.ollama_models_registry import is_vision_capable
+
+    out = []
+    for mid in mids:
+        if not mid:
+            continue
+        # Preserve fallback behavior for "local-model" (True).
+        # For other models, do not blindly assume vision; check known vision patterns.
+        is_vis = (mid == "local-model") or is_vision_capable(mid)
+        out.append({
+            "id": mid,
+            "label": mid,
+            "display_name": mid,
+            "vision": is_vis,
+            "context_window": 8_192,
+            "cost_tier": "free",
+        })
+    return out
+
+
 _FETCHERS = {
-    "claude":  _fetch_claude,
-    "openai":  _fetch_openai,
-    "gemini":  _fetch_gemini,
+    "claude":   _fetch_claude,
+    "openai":   _fetch_openai,
+    "gemini":   _fetch_gemini,
+    "lmstudio": _fetch_lmstudio,
 }
 
 
@@ -318,6 +350,16 @@ def get_model_info(provider: str, model_id: str | None = None) -> ModelInfo:
         for m in models:
             if m.id == model_id:
                 return m
+
+        # Tolerant match for Gemini (with or without 'models/' prefix)
+        p = (provider or "").strip().lower()
+        if p == "gemini":
+            target_norm = model_id[7:] if model_id.startswith("models/") else model_id
+            for m in models:
+                m_norm = m.id[7:] if m.id.startswith("models/") else m.id
+                if m_norm == target_norm:
+                    return m
+
     # Fallback to best default or first available model
     def_id = best_default(provider)
     if def_id:
@@ -407,4 +449,4 @@ if __name__ == "__main__":
                     print(f"[{prov}] FAILED: {e}")
         asyncio.run(_run())
     else:
-        print("Usage: python -m ai.model_registry [show|refresh] [claude|openai|gemini]")
+        print("Usage: python -m ai.model_registry [show|refresh] [claude|openai|gemini|lmstudio]")
