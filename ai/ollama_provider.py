@@ -21,7 +21,8 @@ class OllamaProvider(BaseLLMProvider):
         return cfg.get_ollama_model("vision" if has_screenshots else "text")
 
     def get_capabilities(self, model: str | None = None) -> ModelInfo:
-        chosen = model or self._pick_model(has_screenshots=True)
+        effective = None if model in ("auto", "default", "") else model
+        chosen = effective or self._pick_model(has_screenshots=True)
         is_vis = is_vision_capable(chosen)
         return ModelInfo(
             id=chosen,
@@ -42,7 +43,7 @@ class OllamaProvider(BaseLLMProvider):
         # Resolution order:
         #   1. explicit `model=` arg (panel override)
         #   2. cfg vision/text slot based on attachment kind
-        if model:
+        if model and model not in ("auto", "default"):
             chosen = model
         else:
             chosen = self._pick_model(bool(screenshots_b64))

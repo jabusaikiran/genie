@@ -96,11 +96,12 @@ class WaveformWidget(QWidget):
 
 
 PROVIDER_LABELS = {
-    "claude":  "Claude",
-    "openai":  "GPT-4o",
-    "gemini":  "Gemini",
-    "copilot": "Copilot",
-    "ollama":  f"Ollama ({cfg.ollama_model})",
+    "claude":   "Claude",
+    "openai":   "GPT-4o",
+    "gemini":   "Gemini",
+    "copilot":  "Copilot",
+    "lmstudio": "LM Studio",
+    "ollama":   f"Ollama ({cfg.ollama_model})",
 }
 
 # Provider model lists are fetched live from each vendor's /models endpoint
@@ -301,8 +302,30 @@ class CompanionPanel(QWidget):
                     self._model_combo.addItem(label, userData=m["id"])
             except Exception:
                 self._model_combo.addItem("default", userData="default")
-        else:   # ollama
-            self._model_combo.addItem(cfg.ollama_model, userData=cfg.ollama_model)
+        elif provider == "lmstudio":
+            try:
+                from ai.model_registry import cached_models
+                models = cached_models("lmstudio")
+                if cfg.lmstudio_model and not any(m["id"] == cfg.lmstudio_model for m in models):
+                    self._model_combo.addItem(cfg.lmstudio_model, userData=cfg.lmstudio_model)
+                for m in models:
+                    label = m["id"]
+                    if not m.get("vision"):
+                        label += "  (no vision)"
+                    self._model_combo.addItem(label, userData=m["id"])
+            except Exception:
+                mid = cfg.lmstudio_model or "local-model"
+                self._model_combo.addItem(mid, userData=mid)
+        elif provider == "ollama":
+            self._model_combo.addItem("Auto (vision/text)", userData="auto")
+            v_model = cfg.get_ollama_model("vision")
+            t_model = cfg.get_ollama_model("text")
+            if v_model:
+                self._model_combo.addItem(f"{v_model}  (vision)", userData=v_model)
+            if t_model and t_model != v_model:
+                self._model_combo.addItem(f"{t_model}  (text)", userData=t_model)
+        else:
+            self._model_combo.addItem("default", userData="default")
         self._model_combo.blockSignals(False)
         # Fire once with the new default model id (NOT the display label) so
         # the manager picks it up — important when label != id.
